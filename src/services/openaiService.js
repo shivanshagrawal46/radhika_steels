@@ -2,14 +2,16 @@ const OpenAI = require("openai");
 const env = require("../config/env");
 const logger = require("../config/logger");
 
-// TEMP HARDCODED FOR DEBUGGING — revert after testing
-const HARDCODED_OPENAI_KEY = "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";
-
 let _openai = null;
 const getClient = () => {
   if (!_openai) {
-    const key = env.OPENAI_API_KEY || HARDCODED_OPENAI_KEY;
-    logger.info(`[OPENAI] Creating client — using ${env.OPENAI_API_KEY ? "env" : "HARDCODED"} key, starts with: ${key.substring(0, 12)}...`);
+    const key = env.OPENAI_API_KEY;
+    if (!key) {
+      const msg = "OPENAI_API_KEY is not set! Cannot create OpenAI client.";
+      logger.error(`[OPENAI] ${msg}`);
+      throw new Error(msg);
+    }
+    logger.info(`[OPENAI] Creating client — key starts with: ${key.substring(0, 12)}...`);
     _openai = new OpenAI({ apiKey: key });
   }
   return _openai;

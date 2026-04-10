@@ -2,18 +2,16 @@ const axios = require("axios");
 const env = require("../config/env");
 const logger = require("../config/logger");
 
-// TEMP HARDCODED FOR DEBUGGING — revert after testing
-const HARDCODED_WA_TOKEN = "EAAcAc8GmulEBRACBOb3OSIkzFpRFkZCK36vPZACAzrZCOUBNEz3uhGxw6ZBiHlSpy6AJ8wJcZBDezNxIahIZA7aeWRBWotEmdP3LAZBFPwAZBtwavKZAM5CJixqzoZBZAZAE3srg2H1jj9xpCKMEq8Kd4NuGWaG3Xi8PbEDPYWAX9uxbdfEuqCt1yIgFXagJ8udxoZBKAnkXaR0wEdb6IEr97iUvZBUV2PtYM6cAA9lU9NedW3pV0YI50c6qBoknTE6dUVxZAgVHoVkTrkDBmRflHZCZCTuSFUhiURO58WAsYe9QcpFMh";
-const HARDCODED_WA_PHONE_ID = "1078242918702262";
-
 let _waApi = null;
 const getWaApi = () => {
   if (!_waApi) {
-    const phoneId = env.WA_PHONE_NUMBER_ID || HARDCODED_WA_PHONE_ID;
-    const token = env.WA_ACCESS_TOKEN || HARDCODED_WA_TOKEN;
+    const phoneId = env.WA_PHONE_NUMBER_ID;
+    const token = env.WA_ACCESS_TOKEN;
     const apiVer = env.WA_API_VERSION || "v21.0";
+    if (!token) logger.error("[WA] FATAL — WA_ACCESS_TOKEN is missing!");
+    if (!phoneId) logger.error("[WA] FATAL — WA_PHONE_NUMBER_ID is missing!");
     const baseURL = `https://graph.facebook.com/${apiVer}/${phoneId}`;
-    logger.info(`[WA] Creating client — token=${env.WA_ACCESS_TOKEN ? "from env" : "HARDCODED"}, phoneId=${phoneId}`);
+    logger.info(`[WA] Creating client — token=${token ? "SET" : "MISSING"}, phoneId=${phoneId}`);
     _waApi = axios.create({
       baseURL,
       headers: {
@@ -27,10 +25,7 @@ const getWaApi = () => {
   return _waApi;
 };
 
-const getAuthHeader = () => {
-  const token = env.WA_ACCESS_TOKEN || HARDCODED_WA_TOKEN;
-  return { Authorization: `Bearer ${token}` };
-};
+const getAuthHeader = () => ({ Authorization: `Bearer ${env.WA_ACCESS_TOKEN}` });
 
 // ──────────────────── Sending ────────────────────
 
