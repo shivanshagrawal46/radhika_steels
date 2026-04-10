@@ -1,4 +1,4 @@
-node_modules
+node_modules/
 .env
 logs/
 uploads/images/*
@@ -8,3 +8,5 @@ uploads/video/*
 !uploads/**/.gitkeep
 npm-debug.log*
 *.log
+firebase-service-account.json
+.DS_Store
