@@ -214,7 +214,7 @@ module.exports = (io, socket) => {
           assignedTo: employeeId || null,
           handlerType: handlerType || "employee",
         },
-        { new: true }
+        { returnDocument: "after" }
       )
         .populate("user", "name phone company")
         .populate("assignedTo", "name email")

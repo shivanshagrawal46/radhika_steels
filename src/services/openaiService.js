@@ -2,7 +2,20 @@ const OpenAI = require("openai");
 const env = require("../config/env");
 const logger = require("../config/logger");
 
-const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
+let _openai = null;
+const getClient = () => {
+  if (!_openai) {
+    const key = env.OPENAI_API_KEY;
+    if (!key) {
+      const msg = "OPENAI_API_KEY is not set! Cannot create OpenAI client.";
+      logger.error(`[OPENAI] ${msg}`);
+      throw new Error(msg);
+    }
+    logger.info(`[OPENAI] Creating client — key starts with: ${key.substring(0, 8)}...`);
+    _openai = new OpenAI({ apiKey: key });
+  }
+  return _openai;
+};
 
 // ──────────────────────────────────────────────────────
 // SYSTEM PROMPT — Steel trading domain expert
@@ -154,7 +167,7 @@ const getChatCompletion = async (messages, context = "", parsedIntent = null) =>
   const start = Date.now();
 
   try {
-    const response = await openai.chat.completions.create({
+    const response = await getClient().chat.completions.create({
       model: env.OPENAI_MODEL,
       messages: [...systemMessages, ...messages],
       tools: TOOLS,
@@ -178,7 +191,7 @@ const getChatCompletion = async (messages, context = "", parsedIntent = null) =>
 
       // If the AI only returned a function call without text, do a follow-up
       if (!reply && functionCall) {
-        const followUp = await openai.chat.completions.create({
+        const followUp = await getClient().chat.completions.create({
           model: env.OPENAI_MODEL,
           messages: [
             ...systemMessages,
@@ -211,7 +224,9 @@ const getChatCompletion = async (messages, context = "", parsedIntent = null) =>
       responseTimeMs: Date.now() - start,
     };
   } catch (err) {
-    logger.error("OpenAI API error:", err.message);
+    logger.error(`[OPENAI] API call FAILED: ${err.message}`);
+    if (err.status) logger.error(`[OPENAI] HTTP status: ${err.status}`);
+    if (err.code) logger.error(`[OPENAI] Error code: ${err.code}`);
     throw err;
   }
 };
@@ -221,7 +236,7 @@ const getChatCompletion = async (messages, context = "", parsedIntent = null) =>
  */
 const getEmbedding = async (text) => {
   try {
-    const response = await openai.embeddings.create({
+    const response = await getClient().embeddings.create({
       model: "text-embedding-3-small",
       input: text,
     });

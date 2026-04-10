@@ -2,31 +2,46 @@ const axios = require("axios");
 const env = require("../config/env");
 const logger = require("../config/logger");
 
-const WA_BASE_URL = `https://graph.facebook.com/${env.WA_API_VERSION}/${env.WA_PHONE_NUMBER_ID}`;
+let _waApi = null;
+const getWaApi = () => {
+  if (!_waApi) {
+    const baseURL = `https://graph.facebook.com/${env.WA_API_VERSION}/${env.WA_PHONE_NUMBER_ID}`;
+    if (!env.WA_ACCESS_TOKEN) {
+      logger.error("[WA] FATAL — WA_ACCESS_TOKEN is missing! WhatsApp API calls will fail.");
+    }
+    if (!env.WA_PHONE_NUMBER_ID) {
+      logger.error("[WA] FATAL — WA_PHONE_NUMBER_ID is missing! WhatsApp API calls will fail.");
+    }
+    _waApi = axios.create({
+      baseURL,
+      headers: {
+        Authorization: `Bearer ${env.WA_ACCESS_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 15_000,
+    });
+    logger.info(`[WA] Axios client created — baseURL: ${baseURL.substring(0, 60)}...`);
+  }
+  return _waApi;
+};
 
-const waApi = axios.create({
-  baseURL: WA_BASE_URL,
-  headers: {
-    Authorization: `Bearer ${env.WA_ACCESS_TOKEN}`,
-    "Content-Type": "application/json",
-  },
-  timeout: 15_000,
-});
+const getAuthHeader = () => ({ Authorization: `Bearer ${env.WA_ACCESS_TOKEN}` });
 
 // ──────────────────── Sending ────────────────────
 
 const sendTextMessage = async (to, text) => {
+  logger.debug(`[WA] Sending text to ${to} (${text.length} chars)`);
   try {
-    const res = await waApi.post("/messages", {
+    const res = await getWaApi().post("/messages", {
       messaging_product: "whatsapp",
       to,
       type: "text",
       text: { body: text },
     });
-    logger.debug(`WA text sent to ${to}: ${res.data.messages?.[0]?.id}`);
+    logger.debug(`[WA] Text sent to ${to}: ${res.data.messages?.[0]?.id}`);
     return res.data;
   } catch (err) {
-    logger.error("WA sendText failed:", err.response?.data || err.message);
+    logger.error(`[WA] sendText FAILED to ${to}:`, err.response?.data || err.message);
     throw err;
   }
 };
@@ -34,7 +49,6 @@ const sendTextMessage = async (to, text) => {
 const sendMediaMessage = async (to, media) => {
   const { mediaType, buffer, mimeType, fileName, caption } = media;
 
-  // Upload media to WhatsApp first
   const formData = new FormData();
   const blob = new Blob([buffer], { type: mimeType });
   formData.append("file", blob, fileName || "file");
@@ -45,12 +59,7 @@ const sendMediaMessage = async (to, media) => {
     const uploadRes = await axios.post(
       `https://graph.facebook.com/${env.WA_API_VERSION}/${env.WA_PHONE_NUMBER_ID}/media`,
       formData,
-      {
-        headers: {
-          Authorization: `Bearer ${env.WA_ACCESS_TOKEN}`,
-        },
-        timeout: 30_000,
-      }
+      { headers: getAuthHeader(), timeout: 30_000 }
     );
 
     const mediaId = uploadRes.data.id;
@@ -71,11 +80,11 @@ const sendMediaMessage = async (to, media) => {
       msgPayload.video = { id: mediaId, caption: caption || "" };
     }
 
-    const res = await waApi.post("/messages", msgPayload);
-    logger.debug(`WA media sent to ${to}: ${res.data.messages?.[0]?.id}`);
+    const res = await getWaApi().post("/messages", msgPayload);
+    logger.debug(`[WA] Media sent to ${to}: ${res.data.messages?.[0]?.id}`);
     return res.data;
   } catch (err) {
-    logger.error("WA sendMedia failed:", err.response?.data || err.message);
+    logger.error("[WA] sendMedia FAILED:", err.response?.data || err.message);
     throw err;
   }
 };
@@ -98,10 +107,10 @@ const sendButtonMessage = async (to, bodyText, buttons) => {
   };
 
   try {
-    const res = await waApi.post("/messages", payload);
+    const res = await getWaApi().post("/messages", payload);
     return res.data;
   } catch (err) {
-    logger.error("WA button send failed:", err.response?.data || err.message);
+    logger.error("[WA] Button send FAILED:", err.response?.data || err.message);
     throw err;
   }
 };
@@ -110,28 +119,23 @@ const sendButtonMessage = async (to, bodyText, buttons) => {
 
 const downloadMedia = async (mediaId) => {
   try {
-    // Step 1: Get media URL
     const metaRes = await axios.get(
       `https://graph.facebook.com/${env.WA_API_VERSION}/${mediaId}`,
-      {
-        headers: { Authorization: `Bearer ${env.WA_ACCESS_TOKEN}` },
-        timeout: 10_000,
-      }
+      { headers: getAuthHeader(), timeout: 10_000 }
     );
 
     const mediaUrl = metaRes.data.url;
     if (!mediaUrl) return null;
 
-    // Step 2: Download binary
     const fileRes = await axios.get(mediaUrl, {
-      headers: { Authorization: `Bearer ${env.WA_ACCESS_TOKEN}` },
+      headers: getAuthHeader(),
       responseType: "arraybuffer",
       timeout: 30_000,
     });
 
     return Buffer.from(fileRes.data);
   } catch (err) {
-    logger.error(`Media download failed for ${mediaId}:`, err.message);
+    logger.error(`[WA] Media download FAILED for ${mediaId}:`, err.message);
     return null;
   }
 };
@@ -140,13 +144,13 @@ const downloadMedia = async (mediaId) => {
 
 const markAsRead = async (messageId) => {
   try {
-    await waApi.post("/messages", {
+    await getWaApi().post("/messages", {
       messaging_product: "whatsapp",
       status: "read",
       message_id: messageId,
     });
   } catch (err) {
-    logger.warn("Failed to mark message as read:", err.message);
+    logger.warn("[WA] markAsRead failed:", err.message);
   }
 };
 
@@ -181,7 +185,7 @@ const parseWebhookPayload = (body) => {
       sticker: msg.sticker || null,
       location: msg.location || null,
       interactive: msg.interactive || null,
-      context: msg.context || null, // contains quoted message id for replies
+      context: msg.context || null,
     };
   }
 

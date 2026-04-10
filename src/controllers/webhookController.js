@@ -25,20 +25,29 @@ const verify = (req, res) => {
  * POST /webhook — Handle incoming WhatsApp events.
  */
 const handleEvent = asyncHandler(async (req, res) => {
-  // Always respond 200 immediately to WhatsApp (they retry on failure)
   res.status(200).send("EVENT_RECEIVED");
 
   const parsed = whatsappService.parseWebhookPayload(req.body);
-  if (!parsed) return;
+  if (!parsed) {
+    logger.debug("[WEBHOOK] Received payload with no parseable message/status");
+    return;
+  }
+
+  logger.info(`[WEBHOOK] Event: ${parsed.type} | from: ${parsed.from || parsed.recipientId || "?"} | msgType: ${parsed.messageType || parsed.status || "?"}`);
 
   try {
     if (parsed.type === "message") {
+      logger.info(`[WEBHOOK] Processing message from ${parsed.from}: "${(parsed.text || "").substring(0, 80)}"`);
       await chatService.handleIncomingMessage(parsed);
+      logger.info(`[WEBHOOK] Message from ${parsed.from} processed OK`);
     } else if (parsed.type === "status") {
       await chatService.handleStatusUpdate(parsed);
     }
   } catch (err) {
-    logger.error("Webhook processing error:", err);
+    logger.error(`[WEBHOOK] PROCESSING FAILED for ${parsed.type} from ${parsed.from || "?"}:`);
+    logger.error(`[WEBHOOK] Error name: ${err.name}`);
+    logger.error(`[WEBHOOK] Error message: ${err.message}`);
+    logger.error(`[WEBHOOK] Stack: ${err.stack}`);
   }
 });
 

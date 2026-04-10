@@ -16,7 +16,7 @@ const findOrCreateByFirebase = async (firebaseUid, phone) => {
       $set: { lastActiveAt: new Date() },
       $setOnInsert: { firebaseUid, phone },
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: "after" }
   );
 
   if (!client.phone && phone) {

@@ -126,7 +126,7 @@ module.exports = (io, socket) => {
       const client = await Client.findByIdAndUpdate(
         clientId,
         { isBlocked: true },
-        { new: true }
+        { returnDocument: "after" }
       );
 
       if (!client) return callback({ success: false, error: "Client not found" });
@@ -158,7 +158,7 @@ module.exports = (io, socket) => {
       const client = await Client.findByIdAndUpdate(
         clientId,
         { isBlocked: false },
-        { new: true }
+        { returnDocument: "after" }
       );
 
       if (!client) return callback({ success: false, error: "Client not found" });

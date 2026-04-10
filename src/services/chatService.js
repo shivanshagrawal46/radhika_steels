@@ -32,31 +32,40 @@ function canAutoAdvance(currentStage, newStage) {
 
 const handleIncomingMessage = async (parsed) => {
   const { from, waMessageId, name, text, timestamp, messageType } = parsed;
+  logger.info(`[CHAT] ─── START handleIncomingMessage from=${from} text="${(text || "").substring(0, 60)}" ───`);
+
   const io = getIO();
 
   // 1. Upsert user
+  logger.debug("[CHAT] Step 1: Upserting user...");
   const user = await User.findOneAndUpdate(
     { waId: from },
     {
       $set: { phone: from, name: name || undefined, lastMessageAt: new Date() },
       $setOnInsert: { waId: from },
     },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: "after" }
   );
+  logger.debug(`[CHAT] Step 1 OK: user=${user._id}, name=${user.name}`);
 
   if (user.isBlocked) {
-    logger.info(`Blocked user ${from} tried to message`);
+    logger.info(`[CHAT] Blocked user ${from} — skipping`);
     return;
   }
 
   // 2. Get or create active conversation
+  logger.debug("[CHAT] Step 2: Finding/creating conversation...");
   let conversation = await Conversation.findOne({ user: user._id, status: "active" });
   const isNewConversation = !conversation;
   if (!conversation) {
     conversation = await Conversation.create({ user: user._id, handlerType: "ai" });
+    logger.debug(`[CHAT] Step 2: NEW conversation created: ${conversation._id}`);
+  } else {
+    logger.debug(`[CHAT] Step 2: Existing conversation: ${conversation._id}, handler=${conversation.handlerType}`);
   }
 
   // 3. Handle media
+  logger.debug("[CHAT] Step 3: Downloading media if present...");
   const mediaData = await downloadMediaIfPresent(parsed);
 
   // 4. Save incoming message
@@ -83,8 +92,10 @@ const handleIncomingMessage = async (parsed) => {
     readByAdmin: false,
   });
 
-  // 5. ── INTENT PARSING — the smart part ──
+  // 5. Intent parsing
+  logger.debug("[CHAT] Step 5: Parsing intent...");
   const parsedIntent = intentParser.parse(text);
+  logger.debug(`[CHAT] Step 5 OK: intent=${parsedIntent.intent}, category=${parsedIntent.category || "-"}, size=${parsedIntent.size || "-"}`);
   const suggestedStage = intentParser.intentToStage(parsedIntent.intent);
 
   // Auto-advance stage if appropriate
@@ -159,11 +170,12 @@ const handleIncomingMessage = async (parsed) => {
 
   // 9. If handled by employee, stop here (but still parse + emit)
   if (conversation.handlerType === "employee") {
-    logger.debug(`Conversation ${conversation._id} handled by employee — intent: ${parsedIntent.intent}`);
+    logger.debug(`[CHAT] Conversation ${conversation._id} handled by employee — skipping AI`);
     return;
   }
 
   // 10. Build chat history
+  logger.debug("[CHAT] Step 10: Building chat history...");
   const recentMessages = await Message.find({
     conversation: conversation._id,
     isDeleted: false,
@@ -177,8 +189,10 @@ const handleIncomingMessage = async (parsed) => {
     content: m.content.text || `[${m.content.mediaType}]`,
   }));
 
-  // 11. Build price context + unavailable-size hint
+  // 11. Build price context
+  logger.debug("[CHAT] Step 11: Building price context...");
   let priceContext = await pricingService.buildPriceContext();
+  logger.debug(`[CHAT] Step 11 OK: priceContext length=${priceContext.length}`);
 
   if (parsedIntent.size && !parsedIntent.sizeAvailable && parsedIntent.closestSizes.length > 0) {
     const lines = [
@@ -199,12 +213,14 @@ const handleIncomingMessage = async (parsed) => {
     priceContext += "\n" + lines.join("\n");
   }
 
-  // 12. Get AI response (with parsed intent as hint)
+  // 12. Get AI response
+  logger.info("[CHAT] Step 12: Calling OpenAI...");
   const { reply, functionCall, usage, responseTimeMs } = await openaiService.getChatCompletion(
     chatHistory,
     priceContext,
     parsedIntent
   );
+  logger.info(`[CHAT] Step 12 OK: AI replied in ${responseTimeMs}ms, tokens=${usage.totalTokens}, reply="${reply.substring(0, 80)}..."`);
 
   // 13. Merge AI function call with our local parsing for best results
   const finalIntent = functionCall?.intent || parsedIntent.intent;
@@ -257,19 +273,26 @@ const handleIncomingMessage = async (parsed) => {
   await conversation.save();
 
   // 16. Send via WhatsApp
+  logger.info(`[CHAT] Step 16: Sending WA reply to ${from}...`);
   try {
     const waResponse = await whatsappService.sendTextMessage(from, reply);
     aiMsg.waMessageId = waResponse.messages?.[0]?.id || "";
     aiMsg.deliveryStatus = "sent";
     aiMsg.sentAt = new Date();
     await aiMsg.save();
+    logger.info(`[CHAT] Step 16 OK: WA reply sent, waMessageId=${aiMsg.waMessageId}`);
   } catch (err) {
     aiMsg.deliveryStatus = "failed";
     aiMsg.failedAt = new Date();
     aiMsg.failureReason = err.message;
     await aiMsg.save();
-    logger.error(`Failed to send WA reply to ${from}:`, err.message);
+    logger.error(`[CHAT] Step 16 FAILED — WA reply to ${from}: ${err.message}`);
+    if (err.response?.data) {
+      logger.error(`[CHAT] WA API error body: ${JSON.stringify(err.response.data)}`);
+    }
   }
+
+  logger.info(`[CHAT] ─── END handleIncomingMessage from=${from} ───`);
 
   // 17. Emit AI reply
   const populatedAiMsg = await Message.findById(aiMsg._id).lean();
@@ -388,7 +411,7 @@ const handleStatusUpdate = async (parsed) => {
   else if (status === "read") update.readAt = ts;
   else if (status === "failed") update.failedAt = ts;
 
-  const message = await Message.findOneAndUpdate({ waMessageId }, update, { new: true });
+  const message = await Message.findOneAndUpdate({ waMessageId }, update, { returnDocument: "after" });
   if (message) {
     io.to(`conv:${message.conversation}`).emit("chat:status_update", {
       conversationId: message.conversation.toString(),

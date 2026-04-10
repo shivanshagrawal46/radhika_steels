@@ -46,7 +46,7 @@ module.exports = (io, socket) => {
       }
       const { productId, ...data } = payload;
       const product = await Product.findByIdAndUpdate(productId, data, {
-        new: true,
+        returnDocument: "after",
         runValidators: true,
       });
       if (!product) return callback({ success: false, error: "Product not found" });
