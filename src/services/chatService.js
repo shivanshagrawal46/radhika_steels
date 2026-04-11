@@ -297,17 +297,48 @@ const handleIncomingMessage = async (parsed) => {
     logger.info(`[CHAT] L1b Context enriched: cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge || parsedIntent.mm}`);
   }
 
-  // If order_confirm but no product details from text and no reply-to, carry over from conversation context
-  if (parsedIntent.intent === "order_confirm" && !parsedIntent.category && !replyToContext && conversation.context?.lastDetectedProduct?.category) {
-    const ctx = conversation.context.lastDetectedProduct;
-    parsedIntent.category = ctx.category;
-    parsedIntent.size = ctx.size || null;
-    parsedIntent.gauge = ctx.gauge || null;
-    parsedIntent.mm = ctx.mm || null;
-    parsedIntent.carbonType = ctx.carbonType || "normal";
-    parsedIntent.quantity = parsedIntent.quantity || ctx.quantity || null;
-    parsedIntent.unit = parsedIntent.unit || ctx.unit || "ton";
-    logger.info(`[CHAT] L1b Context enriched (order_confirm): cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge}, qty=${parsedIntent.quantity}`);
+  // If order_confirm but no product details in the text and no reply-to,
+  // look at the LAST 2 USER messages (immediate + one before) for product+quantity.
+  // Only use recent context — never stale data from days ago.
+  if (parsedIntent.intent === "order_confirm" && !parsedIntent.category && !replyToContext) {
+    try {
+      const recentUserMsgs = await Message.find(
+        { conversation: conversation._id, "sender.type": "user", _id: { $ne: incomingMsg._id } },
+        { "content.text": 1 },
+        { sort: { createdAt: -1 }, limit: 2 }
+      ).lean();
+
+      let enrichedFromRecent = false;
+      for (const msg of recentUserMsgs) {
+        const msgParsed = intentParser.parse(msg.content?.text || "");
+        if (msgParsed.category) {
+          parsedIntent.category = msgParsed.category;
+          parsedIntent.size = msgParsed.size || null;
+          parsedIntent.gauge = msgParsed.gauge || null;
+          parsedIntent.mm = msgParsed.mm || null;
+          parsedIntent.carbonType = msgParsed.carbonType || "normal";
+          parsedIntent.quantity = parsedIntent.quantity || msgParsed.quantity || null;
+          parsedIntent.unit = parsedIntent.unit || msgParsed.unit || "ton";
+          enrichedFromRecent = true;
+          logger.info(`[CHAT] L1b Recent-msg enriched (order_confirm): cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge || parsedIntent.mm}, qty=${parsedIntent.quantity}`);
+          break;
+        }
+      }
+
+      if (!enrichedFromRecent && conversation.context?.lastDetectedProduct?.category) {
+        const ctx = conversation.context.lastDetectedProduct;
+        parsedIntent.category = ctx.category;
+        parsedIntent.size = ctx.size || null;
+        parsedIntent.gauge = ctx.gauge || null;
+        parsedIntent.mm = ctx.mm || null;
+        parsedIntent.carbonType = ctx.carbonType || "normal";
+        parsedIntent.quantity = null;
+        parsedIntent.unit = ctx.unit || "ton";
+        logger.info(`[CHAT] L1b Context fallback (order_confirm, no qty): cat=${parsedIntent.category}`);
+      }
+    } catch (err) {
+      logger.warn(`[CHAT] L1b Recent-msg lookup failed: ${err.message}`);
+    }
   }
 
   // ─── Multi-message order flow ───
