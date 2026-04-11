@@ -289,10 +289,14 @@ function parse(text) {
     result.confidence = 0.7;
   }
 
-  // 10. Short follow-up messages
-  if (result.intent === "unknown" && raw.length <= 5) {
-    const c = raw.trim();
-    if (c === "?" || c === "." || /^rate$/i.test(c) || c === "haan" || c === "ha") {
+  // 10. Short follow-up / confirmation messages
+  if (result.intent === "unknown" && raw.length <= 15) {
+    const c = raw.trim().toLowerCase();
+    if (c === "?" || c === "." || /^rate$/i.test(c)) {
+      result.intent = "follow_up";
+      result.confidence = 0.5;
+    }
+    if (/^(?:ji|haan|ha|haa|ok|okay|yes|theek|thik|sahi|done|acha|accha)\s*(?:ji|hai|h|bhai)?\s*[.!]?$/i.test(c)) {
       result.intent = "follow_up";
       result.confidence = 0.5;
     }
@@ -305,7 +309,7 @@ function intentToStage(intent) {
   const map = {
     price_inquiry: "price_inquiry",
     negotiation: "negotiation",
-    order_confirm: "order_confirmed",
+    order_confirm: null, // stage set only by processOrderConfirmation after DB save
     order_inquiry: "price_inquiry",
     follow_up: null,
     delivery_inquiry: null,

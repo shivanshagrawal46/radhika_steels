@@ -220,6 +220,17 @@ const buildMinQtyError = (items) => {
 };
 
 // ──────────────────────────────────────────────
+// Order Quantity Ask — natural employee-like message
+// ──────────────────────────────────────────────
+const buildOrderQuantityAsk = (parsedIntent, userText) => {
+  const isEnglish = /^[a-zA-Z0-9\s.,?!'"()-]+$/.test((userText || "").trim());
+  if (isEnglish) {
+    return "Sure, how many tons do you need?";
+  }
+  return "Ji, kitna ton chahiye aapko?";
+};
+
+// ──────────────────────────────────────────────
 // Delivery Info Response (from DB)
 // ──────────────────────────────────────────────
 const buildDeliveryResponse = (order) => {
@@ -342,6 +353,7 @@ module.exports = {
   buildMultiPriceResponse,
   buildOrderConfirmation,
   buildMinQtyError,
+  buildOrderQuantityAsk,
   buildGreeting,
   buildDeliveryResponse,
   buildFromIntent,

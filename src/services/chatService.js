@@ -301,6 +301,42 @@ const handleIncomingMessage = async (parsed) => {
     logger.info(`[CHAT] L1b Context enriched (order_confirm): cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge}, qty=${parsedIntent.quantity}`);
   }
 
+  // Multi-message order flow: user provides quantity after being asked "kitna ton?"
+  // e.g., previous: "book kariye" → AI asked for quantity → user: "5 ton kariye"
+  const lastWasOrder = conversation.context?.lastIntent === "order_confirm";
+  const orderNotYetCreated = conversation.stage !== "order_confirmed";
+  const hasProductCtx = conversation.context?.lastDetectedProduct?.category;
+
+  if (parsedIntent.intent === "unknown" && parsedIntent.quantity && lastWasOrder && orderNotYetCreated && hasProductCtx) {
+    const ctx = conversation.context.lastDetectedProduct;
+    parsedIntent.intent = "order_confirm";
+    parsedIntent.category = ctx.category;
+    parsedIntent.size = ctx.size || null;
+    parsedIntent.gauge = ctx.gauge || null;
+    parsedIntent.mm = ctx.mm || null;
+    parsedIntent.carbonType = ctx.carbonType || "normal";
+    parsedIntent.unit = parsedIntent.unit || "ton";
+    parsedIntent.confidence = 0.7;
+    logger.info(`[CHAT] L1c Quantity continuation: cat=${parsedIntent.category}, qty=${parsedIntent.quantity}`);
+  }
+
+  // Multi-message order flow: user confirms with "ji", "haan", "ok" after order context
+  if (parsedIntent.intent === "follow_up" && lastWasOrder && orderNotYetCreated && hasProductCtx) {
+    const ctx = conversation.context.lastDetectedProduct;
+    if (ctx.quantity && ctx.quantity > 0) {
+      parsedIntent.intent = "order_confirm";
+      parsedIntent.category = ctx.category;
+      parsedIntent.size = ctx.size || null;
+      parsedIntent.gauge = ctx.gauge || null;
+      parsedIntent.mm = ctx.mm || null;
+      parsedIntent.carbonType = ctx.carbonType || "normal";
+      parsedIntent.quantity = ctx.quantity;
+      parsedIntent.unit = ctx.unit || "ton";
+      parsedIntent.confidence = 0.7;
+      logger.info(`[CHAT] L1c Confirmation follow-up: cat=${parsedIntent.category}, qty=${parsedIntent.quantity}`);
+    }
+  }
+
   // Update conversation context
   const suggestedStage = intentParser.intentToStage(parsedIntent.intent);
   if (suggestedStage && canAutoAdvance(conversation.stage, suggestedStage)) {
@@ -451,6 +487,13 @@ const handleIncomingMessage = async (parsed) => {
           const orderRes = await processOrderConfirmation(fallbackResult, conversation, user, io, from, displayName);
           if (orderRes) responseText = orderRes;
         }
+
+        // Still no order created — ask for quantity so next message can complete the order
+        if (!responseText && parsedIntent.category) {
+          logger.info(`[CHAT] L3-ORDER: No items extracted — asking for quantity`);
+          conversation.context.lastIntent = "order_confirm";
+          responseText = responseBuilder.buildOrderQuantityAsk(parsedIntent, text);
+        }
       }
 
       // ─── STANDARD INTENT CLASSIFICATION ───
@@ -507,6 +550,15 @@ const handleIncomingMessage = async (parsed) => {
             if (orderResult && orderResult.is_order && orderResult.items?.length > 0) {
               const orderRes = await processOrderConfirmation(orderResult, conversation, user, io, from, displayName);
               if (orderRes) responseText = orderRes;
+            }
+
+            // GPT classified as order but couldn't extract items — ask for quantity
+            if (!responseText) {
+              const cat = finalIntent.category || parsedIntent.category;
+              if (cat) {
+                conversation.context.lastIntent = "order_confirm";
+                responseText = responseBuilder.buildOrderQuantityAsk({ ...parsedIntent, ...finalIntent, category: cat }, text);
+              }
             }
           }
 
