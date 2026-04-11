@@ -18,17 +18,37 @@ const userSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    contactName: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    partyName: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    firmName: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    billName: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    gstNo: {
+      type: String,
+      trim: true,
+      default: "",
+    },
     company: {
       type: String,
       trim: true,
       default: "",
     },
     city: {
-      type: String,
-      trim: true,
-      default: "",
-    },
-    gstNumber: {
       type: String,
       trim: true,
       default: "",

@@ -105,13 +105,15 @@ const sendToTokens = async (tokens, { title, body, data = {} }) => {
 /**
  * Send a price update notification to all approved clients.
  */
-const notifyPriceUpdate = async (newBaseRate, updatedBy) => {
+const notifyPriceUpdate = async (newBaseRate, updatedBy, customBody = "") => {
+  const body = customBody || `New base rate: ₹${newBaseRate.toLocaleString("en-IN")}/ton. Open the app for full price list.`;
   return sendToAllApproved({
-    title: "Price Updated — Radhika Steels",
-    body: `New base rate: ₹${newBaseRate.toLocaleString("en-IN")}/ton. Open the app for full price list.`,
+    title: "⚡ Rate Updated — Radhika Steels",
+    body,
     data: {
       type: "price_update",
       baseRate: newBaseRate,
+      updatedAt: new Date().toISOString(),
     },
     type: "price_update",
     sentBy: updatedBy,

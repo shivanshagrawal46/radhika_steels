@@ -35,24 +35,25 @@ const HB_MM_RANGES = [
 const ALL_HB_GAUGES = [
   "6/0", "5/0", "4/0", "3/0", "2/0", "1/0",
   "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
-  "13", "14",
+  "13", "14", "15", "16",
 ];
 
 // ── Patterns ──
 const CATEGORY_PATTERNS = {
-  wr: /\b(?:wr|w\.r\.?|wire\s*rod|wirerod|वायर\s*रॉड|तार)\b/i,
-  hb: /\b(?:hb|h\.b\.?|hb\s*wire|एचबी)\b/i,
-  binding: /\b(?:binding|बाइंडिंग|बंधन)\b/i,
-  nails: /\b(?:nail|nails|कील|किल)\b/i,
+  wr: /(?:^|[\s,.])(wr|w\.r\.?|wire\s*rod|wirerod|वायर\s*रॉड|तार)(?:$|[\s,.])/i,
+  hb: /(?:^|[\s,.])(hb|h\.b\.?|hb\s*wire|एचबी)(?:$|[\s,.])/i,
+  binding: /(?:^|[\s,.])(binding|बाइंडिंग|बंधन)(?:$|[\s,.])/i,
+  nails: /(?:^|[\s,.])(nail|nails|कील|किल)(?:$|[\s,.])/i,
 };
 
-const LC_PATTERN = /\b(?:lc|l\.c\.?|low\s*carbon|लो\s*कार्बन)\b/i;
-const QTY_REGEX = /\b(\d+(?:\.\d+)?)\s*(?:ton|tons|tonne|tonnes|mt|m\.t\.?|metric\s*ton|टन|मीट्रिक\s*टन|kg|किलो|bundle|bundles|बंडल|coil|coils|कॉइल)\b/i;
+const LC_PATTERN = /(?:^|[\s,.])(lc|l\.c\.?|low\s*carbon|लो\s*कार्बन)(?:$|[\s,.])/i;
+const QTY_REGEX = /\b(\d+(?:\.\d+)?)\s*(?:ton|tons|tonne|tonnes|mt|mts|m\.t\.?|metric\s*ton|metric\s*tons|टन|मीट्रिक\s*टन|kg|kgs|किलो|bundle|bundles|बंडल|coil|coils|कॉइल)\b/i;
 const UNIT_MAP = {
   ton: "ton", tons: "ton", tonne: "ton", tonnes: "ton",
-  mt: "ton", "m.t": "ton", "m.t.": "ton", "metric ton": "ton",
+  mt: "ton", mts: "ton", "m.t": "ton", "m.t.": "ton",
+  "metric ton": "ton", "metric tons": "ton",
   "टन": "ton", "मीट्रिक टन": "ton",
-  kg: "kg", "किलो": "kg",
+  kg: "kg", kgs: "kg", "किलो": "kg",
   bundle: "bundle", bundles: "bundle", "बंडल": "bundle",
   coil: "coil", coils: "coil", "कॉइल": "coil",
 };
@@ -64,15 +65,15 @@ const SLASH_GAUGE_REGEX = /\b([1-6]\/0)\b/;
 
 // "se" pattern for mm ranges: "5.3 se 5.4 mm", "6.8 se 6.9"
 const MM_RANGE_REGEX = /(\d+(?:\.\d+)?)\s*(?:se|to|-|–)\s*(\d+(?:\.\d+)?)\s*(?:mm|मिमी)?\b/i;
-// "dia" or "mm" patterns for HB mm size: "5.3mm", "5.3 mm", "5.3 dia"
-const MM_SINGLE_REGEX = /(\d+\.\d+)\s*(?:mm|dia|diameter|मिमी)/i;
+// "mm" / "dia" / "diameter" pattern: "5.3mm", "5.3 dia", "8 diameter"
+const MM_SINGLE_REGEX = /(\d+(?:\.\d+)?)\s*(?:mm|dia|diameter|मिमी)/i;
 
 // Intent patterns — used for hint detection only, NOT for final decision
 // Parser only gets 0.95 when product+size is crystal clear
 const INTENT_HINTS = {
   price_inquiry: [
-    /\b(?:rate|rates|price|prices|bhav|भाव|kya\s*rate|क्या\s*रेट|quote|quotation)\b/i,
-    /\b(?:aaj\s*ka\s*rate|today.?s?\s*rate|current\s*rate|latest\s*rate|new\s*rate)\b/i,
+    /(?:^|[\s,.])(?:rate|rates|price|prices|bhav|भाव|kya\s*rate|क्या\s*रेट|quote|quotation)(?:$|[\s,.\?])/i,
+    /(?:^|[\s,.])(?:aaj\s*ka\s*rate|today.?s?\s*rate|current\s*rate|latest\s*rate|new\s*rate)(?:$|[\s,.\?])/i,
   ],
   greeting: [
     /^(?:hi|hello|hey|namaste|namaskar|नमस्ते|हेलो|good\s*morning|good\s*evening|good\s*afternoon)\s*[!.?]?\s*$/i,
@@ -199,7 +200,7 @@ function parse(text) {
     }
   }
 
-  // 6. Detect single mm for HB: "5.3mm", "5.3 dia"
+  // 6. Detect single mm/dia: "5.3mm", "5.3 dia" — routes to HB if in HB range and not a WR size
   if (!result.mm && !result.gauge) {
     const mmSingle = MM_SINGLE_REGEX.exec(lower);
     if (mmSingle) {
@@ -224,7 +225,7 @@ function parse(text) {
   }
 
   // 8. Extract numbers for WR size
-  if (!result.gauge && !result.mm) {
+  if (!result.gauge && !result.mm && !result.size) {
     const allNumbers = [];
     let match;
     const numRegex = /(\d+(?:\.\d+)?)/g;
@@ -270,24 +271,14 @@ function parse(text) {
   const hasProduct = result.category && (result.size || result.gauge || result.mm);
   const hasPriceHint = result.intent === "price_inquiry";
 
-  if (hasProduct && hasPriceHint) {
-    result.intent = "price_inquiry";
-    result.confidence = 0.95;
-  } else if (hasProduct) {
+  if (hasProduct) {
     result.intent = "price_inquiry";
     result.confidence = 0.95;
   } else if (result.intent === "greeting" || result.intent === "thanks") {
     // already set to 0.95 above
-  } else {
-    // Not clear enough — let GPT handle
-    // Still pass extracted data as hints for GPT
-    if (result.intent === "unknown" && result.category) {
-      result.intent = "price_inquiry";
-      result.confidence = 0.7;
-    }
-    if (result.confidence === 0) {
-      result.confidence = 0;
-    }
+  } else if (result.intent === "unknown" && result.category) {
+    result.intent = "price_inquiry";
+    result.confidence = 0.7;
   }
 
   // 10. Short follow-up messages
@@ -307,6 +298,7 @@ function intentToStage(intent) {
     price_inquiry: "price_inquiry",
     negotiation: "negotiation",
     order_confirm: "order_confirmed",
+    order_inquiry: "price_inquiry",
     follow_up: null,
     delivery_inquiry: null,
     greeting: null,

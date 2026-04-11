@@ -1,4 +1,4 @@
-const { Conversation, Message, User } = require("../models");
+const { Conversation, Message, User, Contact } = require("../models");
 const chatService = require("../services/chatService");
 const logger = require("../config/logger");
 
@@ -6,10 +6,11 @@ module.exports = (io, socket) => {
   // ── chat:list ──
   socket.on("chat:list", async (filters, callback) => {
     try {
-      const { status, stage, page = 1, limit = 30 } = filters || {};
+      const { status, stage, handlerType, page = 1, limit = 30 } = filters || {};
       const query = {};
       if (status) query.status = status;
       if (stage) query.stage = stage;
+      if (handlerType) query.handlerType = handlerType;
 
       const skip = (page - 1) * limit;
 
@@ -18,16 +19,34 @@ module.exports = (io, socket) => {
           .sort({ lastMessageAt: -1 })
           .skip(skip)
           .limit(limit)
-          .populate("user", "name phone company city waId")
+          .populate("user", "name phone company city waId partyName firmName billName gstNo contactName")
           .populate("assignedTo", "name")
-          .populate("linkedOrder", "orderNumber status pricing advancePayment")
+          .populate("linkedOrder", "orderNumber status pricing advancePayment delivery")
           .lean(),
         Conversation.countDocuments(query),
       ]);
 
+      const phones = conversations.map((c) => c.user?.phone || c.user?.waId).filter(Boolean);
+      const contacts = await Contact.find({ phone: { $in: phones } }).lean();
+      const contactMap = {};
+      for (const c of contacts) {
+        if (!contactMap[c.phone]) contactMap[c.phone] = [];
+        contactMap[c.phone].push(c);
+      }
+
+      const enriched = conversations.map((c) => {
+        const phone = c.user?.phone || c.user?.waId || "";
+        const imported = contactMap[phone] || [];
+        const displayName =
+          c.user?.partyName || c.user?.firmName ||
+          (imported.length > 0 ? imported[0].contactName : "") ||
+          c.user?.contactName || c.user?.name || phone;
+        return { ...c, displayName, importedContacts: imported };
+      });
+
       callback({
         success: true,
-        data: conversations,
+        data: enriched,
         pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
       });
     } catch (err) {
@@ -36,7 +55,7 @@ module.exports = (io, socket) => {
     }
   });
 
-  // ── chat:pipeline — get conversations grouped by stage (admin dashboard) ──
+  // ── chat:pipeline — conversations grouped by stage ──
   socket.on("chat:pipeline", async (_payload, callback) => {
     try {
       const pipeline = await Conversation.aggregate([
@@ -54,6 +73,8 @@ module.exports = (io, socket) => {
                 lastMessageAt: "$lastMessageAt",
                 linkedOrder: "$linkedOrder",
                 handlerType: "$handlerType",
+                employeeTakenAt: "$employeeTakenAt",
+                assignedTo: "$assignedTo",
               },
             },
           },
@@ -61,10 +82,9 @@ module.exports = (io, socket) => {
         { $sort: { _id: 1 } },
       ]);
 
-      // Populate user info
       const populated = await Conversation.populate(pipeline, {
         path: "conversations.user",
-        select: "name phone company",
+        select: "name phone company partyName firmName contactName waId",
         model: "User",
       });
 
@@ -79,17 +99,24 @@ module.exports = (io, socket) => {
   socket.on("chat:join", async (conversationId, callback) => {
     try {
       const conversation = await Conversation.findById(conversationId)
-        .populate("user", "name phone company city waId")
+        .populate("user", "name phone company city waId partyName firmName billName gstNo contactName")
         .populate("assignedTo", "name")
-        .populate("linkedOrder", "orderNumber status pricing advancePayment")
+        .populate("linkedOrder", "orderNumber status pricing advancePayment delivery")
         .lean();
 
       if (!conversation) {
         return callback({ success: false, error: "Conversation not found" });
       }
 
+      const phone = conversation.user?.phone || conversation.user?.waId || "";
+      const contacts = await Contact.find({ phone }).lean();
+      const displayName =
+        conversation.user?.partyName || conversation.user?.firmName ||
+        (contacts.length > 0 ? contacts[0].contactName : "") ||
+        conversation.user?.contactName || conversation.user?.name || phone;
+
       socket.join(`conv:${conversationId}`);
-      callback({ success: true, data: conversation });
+      callback({ success: true, data: { ...conversation, displayName, importedContacts: contacts } });
     } catch (err) {
       callback({ success: false, error: err.message });
     }
@@ -144,6 +171,28 @@ module.exports = (io, socket) => {
     }
   });
 
+  // ── chat:take_over — employee takes control of conversation ──
+  socket.on("chat:take_over", async (conversationId, callback) => {
+    try {
+      const conversation = await chatService.takeOverChat(conversationId, socket.employee._id);
+      callback({ success: true, data: { conversationId, handlerType: "employee", employeeTakenAt: conversation.employeeTakenAt } });
+    } catch (err) {
+      logger.error("chat:take_over error:", err.message);
+      callback({ success: false, error: err.message });
+    }
+  });
+
+  // ── chat:release_to_ai — employee releases conversation back to AI ──
+  socket.on("chat:release_to_ai", async (conversationId, callback) => {
+    try {
+      await chatService.releaseToAI(conversationId, socket.employee._id);
+      callback({ success: true, data: { conversationId, handlerType: "ai" } });
+    } catch (err) {
+      logger.error("chat:release_to_ai error:", err.message);
+      callback({ success: false, error: err.message });
+    }
+  });
+
   // ── chat:mark_read ──
   socket.on("chat:mark_read", async (conversationId, callback) => {
     try {
@@ -176,11 +225,10 @@ module.exports = (io, socket) => {
     });
   });
 
-  // ── chat:update_stage — admin manually changes pipeline stage ──
+  // ── chat:update_stage ──
   socket.on("chat:update_stage", async (payload, callback) => {
     try {
       const { conversationId, stage } = payload;
-
       const validStages = [
         "talking", "price_inquiry", "negotiation", "order_confirmed",
         "advance_pending", "advance_received", "payment_complete",
@@ -190,15 +238,36 @@ module.exports = (io, socket) => {
         return callback({ success: false, error: `Invalid stage: ${stage}` });
       }
 
-      const conversation = await chatService.updateStage(
-        conversationId,
-        stage,
-        socket.employee._id
-      );
-
+      const conversation = await chatService.updateStage(conversationId, stage, socket.employee._id);
       callback({ success: true, data: conversation });
     } catch (err) {
       logger.error("chat:update_stage error:", err.message);
+      callback({ success: false, error: err.message });
+    }
+  });
+
+  // ── chat:update_party — save party/firm/GST details ──
+  socket.on("chat:update_party", async (payload, callback) => {
+    try {
+      const { userId, partyName, firmName, billName, gstNo, contactName, city, company } = payload;
+      const user = await chatService.updatePartyDetails(userId, {
+        partyName, firmName, billName, gstNo, contactName, city, company,
+      });
+      io.to("employees").emit("chat:party_updated", { userId, user });
+      callback({ success: true, data: user });
+    } catch (err) {
+      logger.error("chat:update_party error:", err.message);
+      callback({ success: false, error: err.message });
+    }
+  });
+
+  // ── chat:get_user_info — get user details with display name ──
+  socket.on("chat:get_user_info", async (userId, callback) => {
+    try {
+      const info = await chatService.getUserDisplayInfo(userId);
+      if (!info) return callback({ success: false, error: "User not found" });
+      callback({ success: true, data: info });
+    } catch (err) {
       callback({ success: false, error: err.message });
     }
   });
@@ -213,10 +282,11 @@ module.exports = (io, socket) => {
         {
           assignedTo: employeeId || null,
           handlerType: handlerType || "employee",
+          employeeTakenAt: handlerType === "employee" ? new Date() : null,
         },
         { returnDocument: "after" }
       )
-        .populate("user", "name phone company")
+        .populate("user", "name phone company partyName firmName")
         .populate("assignedTo", "name email")
         .lean();
 
@@ -239,16 +309,36 @@ module.exports = (io, socket) => {
   // ── chat:search_users ──
   socket.on("chat:search_users", async (query, callback) => {
     try {
-      const users = await User.find({
-        $or: [
-          { name: { $regex: query, $options: "i" } },
-          { phone: { $regex: query, $options: "i" } },
-          { company: { $regex: query, $options: "i" } },
-        ],
-      })
-        .select("name phone company city waId lastMessageAt")
-        .limit(20)
-        .lean();
+      const searchRegex = { $regex: query, $options: "i" };
+      const [users, contacts] = await Promise.all([
+        User.find({
+          $or: [
+            { name: searchRegex },
+            { phone: searchRegex },
+            { company: searchRegex },
+            { partyName: searchRegex },
+            { firmName: searchRegex },
+            { contactName: searchRegex },
+          ],
+        })
+          .select("name phone company city waId partyName firmName contactName lastMessageAt")
+          .limit(20)
+          .lean(),
+        Contact.find({ contactName: searchRegex })
+          .select("phone contactName syncedBy")
+          .limit(20)
+          .lean(),
+      ]);
+
+      const allPhones = new Set(users.map((u) => u.phone));
+      for (const c of contacts) {
+        if (!allPhones.has(c.phone)) {
+          const u = await User.findOne({ $or: [{ phone: c.phone }, { waId: c.phone }] })
+            .select("name phone company city waId partyName firmName contactName lastMessageAt")
+            .lean();
+          if (u) users.push({ ...u, matchedContactName: c.contactName });
+        }
+      }
 
       callback({ success: true, data: users });
     } catch (err) {

@@ -2,7 +2,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const uuidv4 = () => crypto.randomUUID();
-const { User, Conversation, Message, Order } = require("../models");
+const { User, Conversation, Message, Order, Contact } = require("../models");
 const whatsappService = require("./whatsappService");
 const openaiService = require("./openaiService");
 const pricingService = require("./pricingService");
@@ -20,8 +20,129 @@ const STAGE_ORDER = [
   "dispatched", "delivered", "closed",
 ];
 
+const EMPLOYEE_LOCK_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
+
 function canAutoAdvance(currentStage, newStage) {
   return STAGE_ORDER.indexOf(newStage) > STAGE_ORDER.indexOf(currentStage);
+}
+
+function isEmployeeLocked(conversation) {
+  if (conversation.handlerType !== "employee") return false;
+  if (!conversation.employeeTakenAt) return false;
+  const elapsed = Date.now() - new Date(conversation.employeeTakenAt).getTime();
+  if (elapsed > EMPLOYEE_LOCK_TTL_MS) {
+    logger.info(`[CHAT] 12hr auto-reset: conv=${conversation._id} released back to AI`);
+    return false;
+  }
+  return true;
+}
+
+async function autoResetIfExpired(conversation) {
+  if (conversation.handlerType === "employee" && conversation.employeeTakenAt) {
+    const elapsed = Date.now() - new Date(conversation.employeeTakenAt).getTime();
+    if (elapsed > EMPLOYEE_LOCK_TTL_MS) {
+      conversation.handlerType = "ai";
+      conversation.employeeTakenAt = null;
+      await conversation.save();
+      const io = getIO();
+      io.to("employees").emit("chat:conversation_updated", {
+        conversationId: conversation._id.toString(),
+        handlerType: "ai",
+        autoReset: true,
+      });
+      return true;
+    }
+  }
+  return false;
+}
+
+function getDisplayName(user, contacts) {
+  if (user.partyName) return user.partyName;
+  if (user.firmName) return user.firmName;
+  if (contacts && contacts.length > 0) return contacts[0].contactName;
+  if (user.contactName) return user.contactName;
+  if (user.name) return user.name;
+  return user.phone || user.waId;
+}
+
+// ─────────────────────────────────────────────────────
+// ORDER CONFIRMATION HELPER — DB-first, then template
+// ─────────────────────────────────────────────────────
+async function processOrderConfirmation(orderResult, conversation, user, io, from, displayName) {
+  const items = orderResult.items.map((i) => ({
+    category: i.category, size: i.size || null, gauge: i.gauge || null,
+    mm: i.mm || null, carbonType: i.carbon_type || "normal", quantity: i.quantity || 0,
+  }));
+
+  const totalQty = items.reduce((sum, i) => sum + (i.quantity || 0), 0);
+  const belowMin = items.filter((i) => (i.quantity || 0) < responseBuilder.MIN_QTY_PER_ITEM);
+
+  if (belowMin.length > 0 || totalQty < responseBuilder.MIN_QTY_TOTAL) {
+    return responseBuilder.buildMinQtyError(items);
+  }
+
+  // Calculate prices and build order items FIRST
+  let grandTotal = 0;
+  const orderItems = [];
+  for (const item of items) {
+    let price = null;
+    try {
+      if (item.category === "wr") {
+        price = await pricingService.calculatePrice("wr", { size: item.size || "5.5", carbonType: item.carbonType });
+      } else if (item.category === "hb") {
+        price = item.mm
+          ? await pricingService.calculatePrice("hb", { mm: item.mm })
+          : await pricingService.calculatePrice("hb", { gauge: item.gauge || "12" });
+      }
+    } catch (err) {
+      logger.warn(`[ORDER] Price calc failed: ${err.message}`);
+    }
+    const unitPrice = price ? price.total : 0;
+    const itemTotal = Math.round(unitPrice * (item.quantity || 0));
+    grandTotal += itemTotal;
+    orderItems.push({
+      category: item.category,
+      productName: price ? price.label : `${(item.category || "").toUpperCase()} ${item.size || item.gauge || ""}`.trim(),
+      size: item.size, gauge: item.gauge, mm: item.mm, carbonType: item.carbonType,
+      quantity: item.quantity, unit: "ton", unitPrice, totalPrice: itemTotal,
+    });
+  }
+
+  // Save order to DB FIRST — only send confirmation if DB succeeds
+  try {
+    const order = await Order.create({
+      conversation: conversation._id,
+      user: user._id,
+      items: orderItems,
+      pricing: { grandTotal },
+      status: "advance_pending",
+      advancePayment: { amount: responseBuilder.ADVANCE_AMOUNT, isPaid: false },
+      notes: orderResult.customer_note || "",
+    });
+
+    // Link order to conversation
+    conversation.stage = "order_confirmed";
+    conversation.linkedOrder = order._id;
+    await conversation.save();
+
+    io.to("employees").emit("order:new", {
+      orderId: order._id.toString(),
+      orderNumber: order.orderNumber,
+      conversationId: conversation._id.toString(),
+      items: orderItems,
+      grandTotal,
+      userId: user._id.toString(),
+      userName: displayName || user.name || from,
+    });
+
+    logger.info(`[ORDER] ${order.orderNumber} created, total=₹${grandTotal}`);
+
+    // Only build confirmation text AFTER successful DB save
+    return await responseBuilder.buildOrderConfirmation(items);
+  } catch (err) {
+    logger.error(`[ORDER] DB save failed: ${err.message}`);
+    return null; // Don't send confirmation if DB failed
+  }
 }
 
 // ─────────────────────────────────────────────────────
@@ -46,6 +167,13 @@ const handleIncomingMessage = async (parsed) => {
   if (!conversation) {
     conversation = await Conversation.create({ user: user._id, handlerType: "ai" });
   }
+
+  // 2b. Auto-reset expired employee lock
+  await autoResetIfExpired(conversation);
+
+  // 2c. Resolve display name (party > contact import > WA name > phone)
+  const contacts = await Contact.find({ phone: from }).lean();
+  const displayName = getDisplayName(user, contacts);
 
   // 3. Handle media
   const mediaData = await downloadMediaIfPresent(parsed);
@@ -86,6 +214,33 @@ const handleIncomingMessage = async (parsed) => {
     deliveryStatus: "delivered",
     readByAdmin: false,
   });
+
+  // 5b. Build DB context for AI (delivery, order status, party)
+  let dbContext = "";
+  try {
+    const activeOrders = await Order.find({ user: user._id, status: { $nin: ["delivered", "cancelled"] }, closedAt: null })
+      .sort({ createdAt: -1 }).limit(3).lean();
+    if (activeOrders.length > 0) {
+      const orderLines = activeOrders.map((o) => {
+        const itemsStr = o.items.map((it) => `${it.category?.toUpperCase()} ${it.size || it.gauge || ""}${it.carbonType === "lc" ? " LC" : ""} ${it.quantity}T`).join(", ");
+        const delivery = o.delivery || {};
+        let delStr = "";
+        if (delivery.scheduledDate) delStr += ` DeliveryDate=${new Date(delivery.scheduledDate).toLocaleDateString("en-IN")}`;
+        if (delivery.driverName) delStr += ` Driver=${delivery.driverName}`;
+        if (delivery.driverPhone) delStr += ` DriverPh=${delivery.driverPhone}`;
+        if (delivery.vehicleNumber) delStr += ` Vehicle=${delivery.vehicleNumber}`;
+        if (delivery.dispatchedAt) delStr += ` Dispatched=${new Date(delivery.dispatchedAt).toLocaleDateString("en-IN")}`;
+        return `Order#${o.orderNumber} Status=${o.status} Items=[${itemsStr}] Total=₹${o.pricing?.grandTotal || 0}${delStr}`;
+      });
+      dbContext += `\n\nACTIVE ORDERS for this customer:\n${orderLines.join("\n")}`;
+    }
+
+    if (user.partyName || user.firmName || user.gstNo) {
+      dbContext += `\n\nPARTY DETAILS: Name=${user.partyName || "-"} Firm=${user.firmName || "-"} GST=${user.gstNo || "-"} City=${user.city || "-"}`;
+    }
+  } catch (err) {
+    logger.warn(`[CHAT] DB context build failed: ${err.message}`);
+  }
 
   // 6. LAYER 1 — Intent parsing (FREE)
   let parsedIntent = intentParser.parse(text);
@@ -153,22 +308,22 @@ const handleIncomingMessage = async (parsed) => {
   whatsappService.markAsRead(waMessageId);
 
   // 10. Emit to dashboard
-  emitToDashboard(io, conversation, incomingMsg, isNewConversation, parsedIntent);
+  emitToDashboard(io, conversation, incomingMsg, isNewConversation, parsedIntent, displayName);
 
-  // 11. If employee is handling, stop
-  if (conversation.handlerType === "employee") {
-    logger.info(`[CHAT] Employee handling — skipping AI`);
+  // 10b. If employee is actively handling this chat, skip AI
+  if (isEmployeeLocked(conversation)) {
+    logger.info(`[CHAT] ─── END from=${from} — SKIPPED (employee handling, taken ${Math.round((Date.now() - new Date(conversation.employeeTakenAt).getTime()) / 60000)}m ago) ───`);
     return;
   }
 
-  // ─── LAYER 2: Parser confident (>= 0.95) → template directly, NO GPT ───
+  // 11. AI tries
   let responseText = null;
   let usedGPT = false;
   let aiUsage = { totalTokens: 0 };
   let responseTimeMs = 0;
 
+  // ─── LAYER 2: Parser confident (>= 0.95) → template directly ───
   if (parsedIntent.confidence >= 0.95) {
-    // Default sizes when not specified
     if (parsedIntent.intent === "price_inquiry" && parsedIntent.category === "wr" && !parsedIntent.size) {
       parsedIntent.size = "5.5";
       parsedIntent.sizeAvailable = true;
@@ -179,32 +334,39 @@ const handleIncomingMessage = async (parsed) => {
 
     const templateResult = await responseBuilder.buildFromIntent(parsedIntent);
     if (templateResult && templateResult.isOrderConfirm) {
-      // Order confirm needs GPT verification — fall through to Layer 3
-      logger.info(`[CHAT] L2 Order confirm detected — sending to GPT for verification`);
+      logger.info(`[CHAT] L2 Order confirm → sending to GPT for verification`);
     } else if (templateResult && templateResult.text) {
       responseText = templateResult.text;
       usedGPT = false;
-      logger.info(`[CHAT] L2 Parser confident (${parsedIntent.confidence}) — intent=${parsedIntent.intent}, cat=${parsedIntent.category || "-"}, GPT=NO`);
-
-      if (templateResult.escalateToAdmin) {
-        conversation.handlerType = "employee";
-        await conversation.save();
-        io.to("employees").emit("chat:escalated", {
-          conversationId: conversation._id.toString(),
-          reason: parsedIntent.intent,
-          parsedIntent,
-        });
-      }
+      logger.info(`[CHAT] L2 Parser confident (${parsedIntent.confidence}) — intent=${parsedIntent.intent}, cat=${parsedIntent.category || "-"}`);
     }
   }
 
-  // ─── LAYER 3: Parser NOT confident (< 0.95) → GPT classifies ───
+  // ─── LAYER 2b: Delivery inquiry — check DB for delivery info ───
+  if (!responseText && (parsedIntent.intent === "delivery_inquiry" || text.match(/\b(gadi|gaadi|maal|truck|dispatch|deliver|loading)\b/i))) {
+    try {
+      const activeOrders = await Order.find({ user: user._id, status: { $nin: ["delivered", "cancelled"] }, closedAt: null })
+        .sort({ createdAt: -1 }).limit(1).lean();
+      if (activeOrders.length > 0) {
+        const o = activeOrders[0];
+        const d = o.delivery || {};
+        if (d.scheduledDate || d.dispatchedAt || d.driverName || d.vehicleNumber) {
+          responseText = responseBuilder.buildDeliveryResponse(o);
+          usedGPT = false;
+          logger.info(`[CHAT] L2b Delivery info from DB for order ${o.orderNumber}`);
+        }
+      }
+    } catch (err) {
+      logger.warn(`[CHAT] L2b Delivery check failed: ${err.message}`);
+    }
+  }
+
+  // ─── LAYER 3: Parser not confident → GPT classifies ───
   if (!responseText) {
     logger.info(`[CHAT] L3 GPT — parser conf=${parsedIntent.confidence}, intent=${parsedIntent.intent}`);
 
     const recentMessages = await Message.find({ conversation: conversation._id, isDeleted: false })
       .sort({ createdAt: -1 }).limit(7).lean();
-
     const chatHistory = recentMessages.reverse().map((m) => ({
       role: m.sender.type === "user" ? "user" : "assistant",
       content: m.content.text || `[${m.content.mediaType}]`,
@@ -212,111 +374,28 @@ const handleIncomingMessage = async (parsed) => {
 
     try {
       // ─── ORDER CONFIRMATION FLOW ───
-      if (parsedIntent.intent === "order_confirm") {
-        logger.info(`[CHAT] L3-ORDER: Verifying order with GPT (last ${chatHistory.length} messages)...`);
+      const isOrderIntent = parsedIntent.intent === "order_confirm";
+      if (isOrderIntent) {
+        logger.info(`[CHAT] L3-ORDER: Verifying with GPT...`);
         const { result: orderResult, usage, responseTimeMs: rTime } = await openaiService.verifyOrder(chatHistory);
         aiUsage = usage;
         responseTimeMs = rTime;
         usedGPT = true;
 
         if (orderResult && orderResult.is_order && orderResult.items?.length > 0) {
-          const items = orderResult.items.map((item) => ({
-            category: item.category,
-            size: item.size || null,
-            gauge: item.gauge || null,
-            mm: item.mm || null,
-            carbonType: item.carbon_type || "normal",
-            quantity: item.quantity || 0,
-          }));
-
-          logger.info(`[CHAT] L3-ORDER: GPT confirmed order with ${items.length} items`);
-
-          // Validate minimum quantities
-          const totalQty = items.reduce((sum, i) => sum + (i.quantity || 0), 0);
-          const belowMinItems = items.filter((i) => (i.quantity || 0) < responseBuilder.MIN_QTY_PER_ITEM);
-
-          if (belowMinItems.length > 0 || totalQty < responseBuilder.MIN_QTY_TOTAL) {
-            logger.info(`[CHAT] L3-ORDER: Min qty not met — total=${totalQty}, items_below_min=${belowMinItems.length}`);
-            responseText = responseBuilder.buildMinQtyError(items);
-          } else {
-            responseText = await responseBuilder.buildOrderConfirmation(items);
-
-            // Create order in DB with computed prices
-            try {
-              let grandTotal = 0;
-              const orderItems = [];
-              for (const item of items) {
-                let price;
-                try {
-                  if (item.category === "wr") {
-                    price = await pricingService.calculatePrice("wr", { size: item.size || "5.5", carbonType: item.carbonType });
-                  } else if (item.category === "hb") {
-                    price = item.mm
-                      ? await pricingService.calculatePrice("hb", { mm: item.mm })
-                      : await pricingService.calculatePrice("hb", { gauge: item.gauge || "12" });
-                  }
-                } catch { /* price calc failed */ }
-                const unitPrice = price ? price.total : 0;
-                const itemTotal = Math.round(unitPrice * (item.quantity || 0));
-                grandTotal += itemTotal;
-                const label = price ? price.label : `${item.category.toUpperCase()} ${item.size || item.gauge || ""}`;
-                orderItems.push({
-                  category: item.category,
-                  productName: label,
-                  size: item.size,
-                  gauge: item.gauge,
-                  mm: item.mm,
-                  carbonType: item.carbonType,
-                  quantity: item.quantity,
-                  unit: "ton",
-                  unitPrice,
-                  totalPrice: itemTotal,
-                });
-              }
-
-              const order = await Order.create({
-                conversation: conversation._id,
-                user: user._id,
-                items: orderItems,
-                pricing: { grandTotal },
-                status: "advance_pending",
-                advancePayment: { amount: responseBuilder.ADVANCE_AMOUNT, isPaid: false },
-                notes: orderResult.customer_note || "",
-              });
-
-              conversation.stage = "order_confirmed";
-              conversation.handlerType = "employee";
-              await conversation.save();
-
-              io.to("employees").emit("order:new", {
-                orderId: order._id.toString(),
-                orderNumber: order.orderNumber,
-                conversationId: conversation._id.toString(),
-                items: orderItems,
-                grandTotal,
-                userId: user._id.toString(),
-                userName: user.name || from,
-              });
-
-              logger.info(`[CHAT] L3-ORDER: Order ${order.orderNumber} created, total=${grandTotal}, escalated to admin`);
-            } catch (orderErr) {
-              logger.error(`[CHAT] L3-ORDER: DB save failed: ${orderErr.message}`);
-            }
-          }
-        } else {
-          logger.info(`[CHAT] L3-ORDER: GPT says not a real order — asking for details`);
-          responseText = responseBuilder.TEMPLATES.order_confirm_ask;
+          const orderRes = await processOrderConfirmation(orderResult, conversation, user, io, from, displayName);
+          if (orderRes) responseText = orderRes;
         }
       }
 
       // ─── STANDARD INTENT CLASSIFICATION ───
-      if (!responseText && parsedIntent.intent !== "order_confirm") {
-        const { classified, usage, responseTimeMs: rTime } = await openaiService.classifyIntent(chatHistory);
+      if (!responseText && !isOrderIntent) {
+        const { classified, usage, responseTimeMs: rTime } = await openaiService.classifyIntent(chatHistory, dbContext);
         aiUsage = usage;
         responseTimeMs = rTime;
 
         if (classified) {
-          logger.info(`[CHAT] L3 GPT: intent=${classified.intent}, cat=${classified.category}, gauge=${classified.gauge || "-"}, size=${classified.size || "-"}, needs_admin=${classified.needs_admin}, emotion=${classified.emotion}`);
+          logger.info(`[CHAT] L3 GPT: intent=${classified.intent}, cat=${classified.category}, needs_admin=${classified.needs_admin}`);
 
           const finalIntent = {
             ...parsedIntent,
@@ -332,7 +411,6 @@ const handleIncomingMessage = async (parsed) => {
             confidence: 0.95,
           };
 
-          // Default sizes when not specified
           if (finalIntent.intent === "price_inquiry" && finalIntent.category === "wr" && !finalIntent.size) {
             finalIntent.size = "5.5";
             finalIntent.sizeAvailable = true;
@@ -341,137 +419,94 @@ const handleIncomingMessage = async (parsed) => {
             finalIntent.gauge = "12";
           }
 
-          // GPT detected order_confirm — run order flow
+          // GPT detected order_confirm
           if (classified.intent === "order_confirm") {
-            logger.info(`[CHAT] L3 GPT classified as order_confirm — running order verification...`);
-            const { result: orderResult, usage: orderUsage, responseTimeMs: orderTime } = await openaiService.verifyOrder(chatHistory);
-            aiUsage.totalTokens += orderUsage.totalTokens;
-            responseTimeMs += orderTime;
+            const { result: orderResult, usage: ou, responseTimeMs: ot } = await openaiService.verifyOrder(chatHistory);
+            aiUsage.totalTokens += ou.totalTokens;
+            responseTimeMs += ot;
+            usedGPT = true;
 
             if (orderResult && orderResult.is_order && orderResult.items?.length > 0) {
-              const items = orderResult.items.map((item) => ({
-                category: item.category,
-                size: item.size || null,
-                gauge: item.gauge || null,
-                mm: item.mm || null,
-                carbonType: item.carbon_type || "normal",
-                quantity: item.quantity || 0,
-              }));
-
-              const totalQty = items.reduce((sum, i) => sum + (i.quantity || 0), 0);
-              const belowMinItems = items.filter((i) => (i.quantity || 0) < responseBuilder.MIN_QTY_PER_ITEM);
-
-              if (belowMinItems.length > 0 || totalQty < responseBuilder.MIN_QTY_TOTAL) {
-                responseText = responseBuilder.buildMinQtyError(items);
-              } else {
-                responseText = await responseBuilder.buildOrderConfirmation(items);
-                try {
-                  let grandTotal2 = 0;
-                  const orderItems2 = [];
-                  for (const item of items) {
-                    let price;
-                    try {
-                      if (item.category === "wr") {
-                        price = await pricingService.calculatePrice("wr", { size: item.size || "5.5", carbonType: item.carbonType });
-                      } else if (item.category === "hb") {
-                        price = item.mm
-                          ? await pricingService.calculatePrice("hb", { mm: item.mm })
-                          : await pricingService.calculatePrice("hb", { gauge: item.gauge || "12" });
-                      }
-                    } catch { /* skip */ }
-                    const unitPrice = price ? price.total : 0;
-                    const itemTotal = Math.round(unitPrice * (item.quantity || 0));
-                    grandTotal2 += itemTotal;
-                    orderItems2.push({
-                      category: item.category,
-                      productName: price ? price.label : `${item.category.toUpperCase()} ${item.size || item.gauge || ""}`,
-                      size: item.size, gauge: item.gauge, mm: item.mm,
-                      carbonType: item.carbonType, quantity: item.quantity,
-                      unit: "ton", unitPrice, totalPrice: itemTotal,
-                    });
-                  }
-                  const order = await Order.create({
-                    conversation: conversation._id,
-                    user: user._id,
-                    items: orderItems2,
-                    pricing: { grandTotal: grandTotal2 },
-                    status: "advance_pending",
-                    advancePayment: { amount: responseBuilder.ADVANCE_AMOUNT, isPaid: false },
-                    notes: orderResult.customer_note || "",
-                  });
-                  conversation.stage = "order_confirmed";
-                  conversation.handlerType = "employee";
-                  await conversation.save();
-                  io.to("employees").emit("order:new", {
-                    orderId: order._id.toString(),
-                    orderNumber: order.orderNumber,
-                    conversationId: conversation._id.toString(),
-                    items: orderItems2, grandTotal: grandTotal2,
-                    userId: user._id.toString(),
-                    userName: user.name || from,
-                  });
-                  logger.info(`[CHAT] L3-ORDER: Order ${order.orderNumber} created, total=${grandTotal2}`);
-                } catch (orderErr) {
-                  logger.error(`[CHAT] L3-ORDER: DB save failed: ${orderErr.message}`);
-                }
-              }
-              usedGPT = true;
-            } else {
-              responseText = responseBuilder.TEMPLATES.order_confirm_ask;
-              usedGPT = true;
+              const orderRes = await processOrderConfirmation(orderResult, conversation, user, io, from, displayName);
+              if (orderRes) responseText = orderRes;
             }
           }
 
+          // Try template for the classified intent
           if (!responseText) {
             parsedIntent = finalIntent;
             const templateResult = await responseBuilder.buildFromIntent(finalIntent);
             if (templateResult && templateResult.text) {
               responseText = templateResult.text;
               usedGPT = true;
-
-              if (templateResult.escalateToAdmin) {
-                conversation.handlerType = "employee";
-                await conversation.save();
-                io.to("employees").emit("chat:escalated", {
-                  conversationId: conversation._id.toString(),
-                  reason: finalIntent.intent,
-                  parsedIntent: finalIntent,
-                });
-              }
             }
           }
 
+          // If GPT says needs_admin → DON'T reply, just notify dashboard
           if (!responseText && classified.needs_admin) {
-            responseText = responseBuilder.getTemplate("admin_escalation");
-            conversation.handlerType = "employee";
-            await conversation.save();
+            logger.info(`[CHAT] AI can't answer — staying silent, notifying dashboard`);
+            io.to("employees").emit("chat:needs_attention", {
+              conversationId: conversation._id.toString(),
+              userId: user._id.toString(),
+              userName: displayName || user.name || from,
+              phone: from,
+              lastMessage: text,
+              intent: classified.intent,
+              emotion: classified.emotion,
+            });
+            logger.info(`[CHAT] ─── END from=${from} — SILENT (needs employee) ───`);
+            return;
           }
         }
       }
 
-      // If still no response, generate conversational reply
+      // If still no response — try conversational reply (only for safe topics)
       if (!responseText) {
-        logger.info(`[CHAT] L3b Generating conversational response...`);
-        const { reply, usage: u2, responseTimeMs: r2 } = await openaiService.generateResponse(chatHistory);
-        responseText = reply || responseBuilder.getTemplate("admin_escalation");
-        aiUsage.totalTokens += u2.totalTokens;
-        responseTimeMs += r2;
-        usedGPT = true;
+        logger.info(`[CHAT] L3b Conversational response...`);
+        const { reply, usage: u2, responseTimeMs: r2 } = await openaiService.generateResponse(chatHistory, dbContext);
+        if (reply && reply.trim()) {
+          responseText = reply;
+          aiUsage.totalTokens += u2.totalTokens;
+          responseTimeMs += r2;
+          usedGPT = true;
+        } else {
+          // GPT couldn't generate safe response — stay silent, notify dashboard
+          logger.info(`[CHAT] AI has no safe response — staying silent, notifying dashboard`);
+          io.to("employees").emit("chat:needs_attention", {
+            conversationId: conversation._id.toString(),
+            userId: user._id.toString(),
+            userName: displayName || user.name || from,
+            phone: from,
+            lastMessage: text,
+          });
+          logger.info(`[CHAT] ─── END from=${from} — SILENT ───`);
+          return;
+        }
       }
     } catch (err) {
       logger.error(`[CHAT] L3 GPT failed: ${err.message}`);
+      // GPT failed — try template with parser data
       const fallback = await responseBuilder.buildFromIntent(parsedIntent);
       if (fallback && fallback.text) {
         responseText = fallback.text;
       } else {
-        responseText = responseBuilder.getTemplate("admin_escalation");
-        conversation.handlerType = "employee";
-        await conversation.save();
+        // Can't answer — stay silent, notify dashboard
+        logger.info(`[CHAT] GPT failed, no fallback — staying silent`);
+        io.to("employees").emit("chat:needs_attention", {
+          conversationId: conversation._id.toString(),
+          userId: user._id.toString(),
+          userName: displayName || user.name || from,
+          phone: from,
+          lastMessage: text,
+          error: err.message,
+        });
+        logger.info(`[CHAT] ─── END from=${from} — SILENT (GPT error) ───`);
+        return;
       }
     }
   }
 
-  // 12. Save AI message
+  // 12. Save AI message & send
   const aiMsg = await Message.create({
     conversation: conversation._id,
     sender: { type: "ai" },
@@ -505,17 +540,15 @@ const handleIncomingMessage = async (parsed) => {
     aiMsg.deliveryStatus = "sent";
     aiMsg.sentAt = new Date();
     await aiMsg.save();
-    logger.info(`[CHAT] Reply sent OK — waId=${aiMsg.waMessageId}`);
   } catch (err) {
     aiMsg.deliveryStatus = "failed";
     aiMsg.failedAt = new Date();
     aiMsg.failureReason = err.message;
     await aiMsg.save();
     logger.error(`[CHAT] WA send FAILED: ${err.message}`);
-    if (err.response?.data) logger.error(`[CHAT] WA error: ${JSON.stringify(err.response.data)}`);
   }
 
-  // 14. Emit AI reply
+  // 14. Emit to dashboard
   const populatedAiMsg = await Message.findById(aiMsg._id).lean();
   io.to(`conv:${conversation._id}`).emit("chat:new_message", {
     conversationId: conversation._id.toString(),
@@ -526,8 +559,6 @@ const handleIncomingMessage = async (parsed) => {
     lastMessage: conversation.lastMessage,
     lastMessageAt: conversation.lastMessageAt,
     stage: conversation.stage,
-    linkedOrder: conversation.linkedOrder,
-    context: conversation.context,
   });
 
   logger.info(`[CHAT] ─── END from=${from} GPT=${usedGPT} tokens=${aiUsage.totalTokens} ───`);
@@ -566,6 +597,9 @@ const sendEmployeeMessage = async ({ conversationId, employeeId, text, replyTo, 
   if (conversation.handlerType === "ai") {
     conversation.handlerType = "employee";
     conversation.assignedTo = employeeId;
+    conversation.employeeTakenAt = new Date();
+  } else {
+    conversation.employeeTakenAt = new Date();
   }
   conversation.messageCount += 1;
   conversation.lastMessage = {
@@ -670,16 +704,17 @@ const updateStage = async (conversationId, newStage, employeeId) => {
 // ─────────────────────────────────────────────────────
 // HELPERS
 // ─────────────────────────────────────────────────────
-function emitToDashboard(io, conversation, incomingMsg, isNewConversation, parsedIntent) {
+function emitToDashboard(io, conversation, incomingMsg, isNewConversation, parsedIntent, displayName) {
   const msgLean = incomingMsg.toObject ? incomingMsg.toObject() : incomingMsg;
   Conversation.findById(conversation._id)
-    .populate("user", "name phone company city waId")
+    .populate("user", "name phone company city waId partyName firmName contactName")
     .populate("assignedTo", "name")
     .lean()
     .then((convForEmit) => {
       io.to("employees").emit("chat:notification", {
         type: isNewConversation ? "new_conversation" : "new_message",
         conversation: convForEmit,
+        displayName: displayName || convForEmit?.user?.name || "",
         message: msgLean,
         parsedIntent,
       });
@@ -690,10 +725,12 @@ function emitToDashboard(io, conversation, incomingMsg, isNewConversation, parse
       });
       io.to("employees").emit("chat:conversation_updated", {
         conversationId: conversation._id.toString(),
+        displayName: displayName || convForEmit?.user?.name || "",
         unreadCount: conversation.unreadCount,
         lastMessage: conversation.lastMessage,
         lastMessageAt: conversation.lastMessageAt,
         stage: conversation.stage,
+        handlerType: conversation.handlerType,
         context: conversation.context,
       });
     })
@@ -759,9 +796,103 @@ function getExtFromMime(mime) {
   return map[mime] || ".bin";
 }
 
+// ─────────────────────────────────────────────────────
+// EMPLOYEE HANDOFF — take over / release / auto-reset
+// ─────────────────────────────────────────────────────
+const takeOverChat = async (conversationId, employeeId) => {
+  const io = getIO();
+  const conversation = await Conversation.findById(conversationId);
+  if (!conversation) throw new AppError("Conversation not found", 404);
+
+  conversation.handlerType = "employee";
+  conversation.assignedTo = employeeId;
+  conversation.employeeTakenAt = new Date();
+  await conversation.save();
+
+  io.to("employees").emit("chat:conversation_updated", {
+    conversationId: conversationId.toString(),
+    handlerType: "employee",
+    assignedTo: employeeId,
+    employeeTakenAt: conversation.employeeTakenAt,
+  });
+  io.to(`conv:${conversationId}`).emit("chat:handler_changed", {
+    conversationId: conversationId.toString(),
+    handlerType: "employee",
+    employeeId,
+  });
+
+  logger.info(`[CHAT] Employee ${employeeId} took over conv=${conversationId}`);
+  return conversation;
+};
+
+const releaseToAI = async (conversationId, employeeId) => {
+  const io = getIO();
+  const conversation = await Conversation.findById(conversationId);
+  if (!conversation) throw new AppError("Conversation not found", 404);
+
+  conversation.handlerType = "ai";
+  conversation.assignedTo = null;
+  conversation.employeeTakenAt = null;
+  await conversation.save();
+
+  io.to("employees").emit("chat:conversation_updated", {
+    conversationId: conversationId.toString(),
+    handlerType: "ai",
+    assignedTo: null,
+    releasedBy: employeeId,
+  });
+  io.to(`conv:${conversationId}`).emit("chat:handler_changed", {
+    conversationId: conversationId.toString(),
+    handlerType: "ai",
+  });
+
+  logger.info(`[CHAT] Employee ${employeeId} released conv=${conversationId} to AI`);
+  return conversation;
+};
+
+// ─────────────────────────────────────────────────────
+// PARTY DETAILS — save/update for a user
+// ─────────────────────────────────────────────────────
+const updatePartyDetails = async (userId, details) => {
+  const update = {};
+  if (details.partyName !== undefined) update.partyName = details.partyName;
+  if (details.firmName !== undefined) update.firmName = details.firmName;
+  if (details.billName !== undefined) update.billName = details.billName;
+  if (details.gstNo !== undefined) update.gstNo = details.gstNo;
+  if (details.contactName !== undefined) update.contactName = details.contactName;
+  if (details.city !== undefined) update.city = details.city;
+  if (details.company !== undefined) update.company = details.company;
+
+  const user = await User.findByIdAndUpdate(userId, { $set: update }, { returnDocument: "after" }).lean();
+  if (!user) throw new AppError("User not found", 404);
+
+  logger.info(`[CHAT] Party details updated for user=${userId}`);
+  return user;
+};
+
+// ─────────────────────────────────────────────────────
+// GET USER WITH DISPLAY NAME
+// ─────────────────────────────────────────────────────
+const getUserDisplayInfo = async (userId) => {
+  const user = await User.findById(userId).lean();
+  if (!user) return null;
+  const contacts = await Contact.find({ phone: user.phone || user.waId }).lean();
+  return {
+    ...user,
+    displayName: getDisplayName(user, contacts),
+    importedContacts: contacts,
+  };
+};
+
 module.exports = {
   handleIncomingMessage,
   sendEmployeeMessage,
   handleStatusUpdate,
   updateStage,
+  takeOverChat,
+  releaseToAI,
+  updatePartyDetails,
+  getUserDisplayInfo,
+  autoResetIfExpired,
+  EMPLOYEE_LOCK_TTL_MS,
 };

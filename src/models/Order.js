@@ -86,6 +86,14 @@ const orderSchema = new mongoose.Schema(
       ],
       default: "inquiry",
     },
+    delivery: {
+      driverName: { type: String, default: "" },
+      driverPhone: { type: String, default: "" },
+      vehicleNumber: { type: String, default: "" },
+      scheduledDate: { type: Date, default: null },
+      dispatchedAt: { type: Date, default: null },
+      deliveredAt: { type: Date, default: null },
+    },
     deliveryAddress: {
       line1: { type: String, default: "" },
       line2: { type: String, default: "" },
@@ -93,6 +101,7 @@ const orderSchema = new mongoose.Schema(
       state: { type: String, default: "" },
       pincode: { type: String, default: "" },
     },
+    closedAt: { type: Date, default: null },
     notes: { type: String, default: "" },
     assignedTo: {
       type: mongoose.Schema.Types.ObjectId,

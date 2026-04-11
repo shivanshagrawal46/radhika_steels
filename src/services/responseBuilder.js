@@ -1,7 +1,11 @@
 const pricingService = require("./pricingService");
 const logger = require("../config/logger");
 
-const INR = (n) => "₹" + Math.round(n).toLocaleString("en-IN");
+const INR = (n) => {
+  const val = Number(n);
+  if (!isFinite(val)) return "₹0";
+  return "₹" + Math.round(val).toLocaleString("en-IN");
+};
 const BRAND = "*Radhika Steel Raipur*";
 
 // ──────────────────────────────────────────────
@@ -199,7 +203,10 @@ const buildMinQtyError = (items) => {
   if (itemErrors.length > 0) {
     msg += `\n`;
     for (const item of itemErrors) {
-      const label = item.category === "wr" ? `WR ${item.size || "5.5"}mm` : `HB ${item.gauge || "12"}g`;
+      let label;
+      if (item.category === "wr") label = `WR ${item.size || "5.5"}mm`;
+      else if (item.mm) label = `HB ${item.mm}mm`;
+      else label = `HB ${item.gauge || "12"}g`;
       msg += `${label}: ${item.quantity || 0}T (min ${MIN_QTY_PER_ITEM}T chahiye)\n`;
     }
   }
@@ -213,32 +220,61 @@ const buildMinQtyError = (items) => {
 };
 
 // ──────────────────────────────────────────────
+// Delivery Info Response (from DB)
+// ──────────────────────────────────────────────
+const buildDeliveryResponse = (order) => {
+  const d = order.delivery || {};
+  const status = String(order.status || "pending").replace(/_/g, " ").toUpperCase();
+  let msg = `${BRAND}\n\n`;
+  msg += `*Order: ${order.orderNumber || "N/A"}*\n`;
+  msg += `Status: *${status}*\n`;
+
+  const dateFmt = { day: "numeric", month: "short", year: "numeric" };
+  if (d.scheduledDate) msg += `\nDelivery Date: *${new Date(d.scheduledDate).toLocaleDateString("en-IN", dateFmt)}*`;
+  if (d.dispatchedAt) msg += `\nDispatched: *${new Date(d.dispatchedAt).toLocaleDateString("en-IN", dateFmt)}*`;
+  if (d.driverName) msg += `\nDriver: *${d.driverName}*`;
+  if (d.driverPhone) msg += `\nDriver Phone: *${d.driverPhone}*`;
+  if (d.vehicleNumber) msg += `\nVehicle: *${d.vehicleNumber}*`;
+  if (d.deliveredAt) msg += `\nDelivered: *${new Date(d.deliveredAt).toLocaleDateString("en-IN", dateFmt)}*`;
+
+  if (!d.scheduledDate && !d.dispatchedAt && !d.driverName && !d.driverPhone && !d.vehicleNumber) {
+    msg += `\nDelivery details abhi update nahi hui hain. Jaldi update milega.`;
+  }
+
+  return msg;
+};
+
+// ──────────────────────────────────────────────
 // Template responses
 // ──────────────────────────────────────────────
 const buildGreeting = async () => {
-  let msg = `${BRAND}\n\nNamaste! 🙏\n\nAaj ke rates:\n`;
+  let msg = `${BRAND}\n\nNamaste! 🙏\n`;
   try {
     const wr = await pricingService.calculatePrice("wr", { size: "5.5", carbonType: "normal" });
-    msg += `\n▸ *WR 5.5mm* — *${INR(wr.total)}/ton*`;
+    msg += `\n*WR 5.5mm*\n`;
+    msg += `${INR(wr.mergedBase)} + ${INR(wr.fixedCharge)} + ${wr.gstPercent}% GST\n`;
+    msg += `*${INR(wr.total)}/ton*\n`;
   } catch { /* skip */ }
   try {
     const hb = await pricingService.calculatePrice("hb", { gauge: "12" });
-    msg += `\n▸ *HB Wire 12g* — *${INR(hb.total)}/ton*`;
+    msg += `\n*HB Wire 12g*\n`;
+    msg += `${INR(hb.mergedBase)} + ${INR(hb.fixedCharge)} + ${hb.gstPercent}% GST\n`;
+    msg += `*${INR(hb.total)}/ton*\n`;
   } catch { /* skip */ }
-  msg += `\n\nAapko kaunsa size chahiye? Bataiye.`;
+  msg += `\nAapko kaunsa size chahiye? Bataiye.`;
   return msg;
 };
 
 const TEMPLATES = {
   thanks: `${BRAND}\n\nDhanyawad! 🙏\nKoi aur madad chahiye toh batayein.`,
 
-  negotiation: `${BRAND}\n\nAapki baat team tak pahuncha dete hain. Best rate ke saath jaldi reply milega. 🙏`,
+  negotiation: null,
 
-  delivery_inquiry: `${BRAND}\n\nDelivery status check karke batate hain. Thodi der mein update milega.`,
+  delivery_inquiry: null,
 
-  admin_escalation: `${BRAND}\n\nAapka sawaal team ke paas bhej diya hai. Jaldi reply aayega. 🙏`,
+  order_inquiry: `${BRAND}\n\nOrder ke liye:\n\n▸ Har item minimum *2 ton*\n▸ Total minimum *5 ton*\n▸ Advance: *₹50,000* (booking ke liye)\n▸ Balance: loading ke time\n▸ Transport: aapki taraf se\n\nProduct aur quantity bataiye, order process kar denge.`,
 
-  order_confirm_ask: `${BRAND}\n\nOrder confirm karne ke liye batayein:\n\n▸ Quantity (kitna ton)\n▸ Delivery location\n▸ Firm name / GST no.\n\n_Details milte hi process karenge._`,
+  order_confirm_ask: `${BRAND}\n\nOrder confirm karne ke liye batayein:\n\n▸ Product aur size\n▸ Quantity (kitna ton)\n▸ Delivery location\n▸ Firm name / GST no.\n\n_Details milte hi process karenge._`,
 };
 
 const getTemplate = (key) => TEMPLATES[key] || null;
@@ -254,8 +290,9 @@ const buildFromIntent = async (parsedIntent) => {
     return { text, usedGPT: false };
   }
   if (intent === "thanks") return { text: TEMPLATES.thanks, usedGPT: false };
-  if (intent === "negotiation") return { text: TEMPLATES.negotiation, usedGPT: false, escalateToAdmin: true };
-  if (intent === "delivery_inquiry") return { text: TEMPLATES.delivery_inquiry, usedGPT: false, escalateToAdmin: true };
+  if (intent === "negotiation") return null;
+  if (intent === "delivery_inquiry") return null; // handled in chatService from DB
+  if (intent === "order_inquiry") return { text: TEMPLATES.order_inquiry, usedGPT: false };
 
   if (intent === "price_inquiry" || intent === "follow_up") {
     if (category === "wr") {
@@ -321,6 +358,7 @@ module.exports = {
   buildOrderConfirmation,
   buildMinQtyError,
   buildGreeting,
+  buildDeliveryResponse,
   buildFromIntent,
   getTemplate,
   TEMPLATES,

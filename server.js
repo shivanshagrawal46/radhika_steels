@@ -24,6 +24,29 @@ const startServer = async () => {
     logger.info(`Radhika Steels API running on port ${env.PORT} [${env.NODE_ENV}]`);
     logger.info("Transport: Socket.IO (ws://) + HTTP webhook (/webhook)");
     logger.info("──── Server ready ────");
+
+    // 12-hour auto-reset: release employee-locked conversations back to AI
+    const { Conversation } = require("./src/models");
+    const RESET_CHECK_INTERVAL = 15 * 60 * 1000; // every 15 mins
+    const EMPLOYEE_LOCK_TTL = 12 * 60 * 60 * 1000;
+
+    setInterval(async () => {
+      try {
+        const cutoff = new Date(Date.now() - EMPLOYEE_LOCK_TTL);
+        const result = await Conversation.updateMany(
+          { handlerType: "employee", employeeTakenAt: { $lt: cutoff } },
+          { $set: { handlerType: "ai", employeeTakenAt: null } }
+        );
+        if (result.modifiedCount > 0) {
+          logger.info(`[SCHEDULER] Auto-reset ${result.modifiedCount} conversations from employee → AI`);
+          const io = socketIO.getIO();
+          io.to("employees").emit("chat:bulk_reset", { count: result.modifiedCount });
+        }
+      } catch (err) {
+        logger.error(`[SCHEDULER] Auto-reset failed: ${err.message}`);
+      }
+    }, RESET_CHECK_INTERVAL);
+    logger.info("[BOOT] 12hr auto-reset scheduler started (every 15min)");
   });
 
   const shutdown = (signal) => {

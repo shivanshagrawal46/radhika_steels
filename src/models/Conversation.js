@@ -22,6 +22,10 @@ const conversationSchema = new mongoose.Schema(
       enum: ["ai", "employee"],
       default: "ai",
     },
+    employeeTakenAt: {
+      type: Date,
+      default: null,
+    },
 
     // ── Order pipeline stage (visible on admin dashboard) ──
     stage: {
@@ -56,6 +60,8 @@ const conversationSchema = new mongoose.Schema(
       lastDetectedProduct: {
         category: { type: String, default: "" },
         size: { type: String, default: "" },
+        gauge: { type: String, default: "" },
+        mm: { type: String, default: "" },
         carbonType: { type: String, default: "" },
         quantity: { type: Number, default: 0 },
         unit: { type: String, default: "" },
