@@ -67,25 +67,18 @@ const MM_RANGE_REGEX = /(\d+(?:\.\d+)?)\s*(?:se|to|-|–)\s*(\d+(?:\.\d+)?)\s*(?
 // "dia" or "mm" patterns for HB mm size: "5.3mm", "5.3 mm", "5.3 dia"
 const MM_SINGLE_REGEX = /(\d+\.\d+)\s*(?:mm|dia|diameter|मिमी)/i;
 
-const INTENT_PATTERNS = {
+// Intent patterns — used for hint detection only, NOT for final decision
+// Parser only gets 0.95 when product+size is crystal clear
+const INTENT_HINTS = {
   price_inquiry: [
-    /\b(?:rate|rates|price|prices|cost|bhav|भाव|kitna|कितना|kya\s*rate|क्या\s*रेट|batao|बताओ|bata|बता|quote|quotation)\b/i,
+    /\b(?:rate|rates|price|prices|bhav|भाव|kya\s*rate|क्या\s*रेट|quote|quotation)\b/i,
     /\b(?:aaj\s*ka\s*rate|today.?s?\s*rate|current\s*rate|latest\s*rate|new\s*rate)\b/i,
   ],
-  order_confirm: [
-    /\b(?:confirm|confirmed|book|booked|order\s*kar|finali[sz]e|pakka|पक्का|done|ok\s*book|le\s*lo|lelo|भेज\s*दो|bhej\s*do|daal\s*do|डाल\s*दो)\b/i,
-  ],
-  negotiation: [
-    /\b(?:negotiat|discount|kam\s*kar|कम\s*कर|reduce|lower|best\s*price|thoda\s*kam|थोड़ा\s*कम|sahi\s*rate|सही\s*रेट|aur\s*kam|और\s*कम|kuch\s*kam|कुछ\s*कम|margin|concession)\b/i,
-  ],
-  delivery_inquiry: [
-    /\b(?:gadi|गाड़ी|gaadi|vehicle|truck|dispatch|nikli|निकली|nikla|निकला|kab\s*tak|कब\s*तक|delivery|shipped|transport|माल|maal\s*nikla|status|tracking|pahunch|पहुंच)\b/i,
-  ],
   greeting: [
-    /^(?:hi|hello|hey|namaste|namaskar|नमस्ते|हेलो|good\s*morning|good\s*evening|good\s*afternoon)\s*[!.]?\s*$/i,
+    /^(?:hi|hello|hey|namaste|namaskar|नमस्ते|हेलो|good\s*morning|good\s*evening|good\s*afternoon)\s*[!.?]?\s*$/i,
   ],
   thanks: [
-    /\b(?:thank|thanks|shukriya|शुक्रिया|dhanyawad|धन्यवाद|ok\s*thanks|theek\s*hai)\b/i,
+    /^(?:ok\s*)?(?:thank|thanks|shukriya|शुक्रिया|dhanyawad|धन्यवाद|theek\s*hai)\s*[!.]?\s*$/i,
   ],
 };
 
@@ -130,6 +123,8 @@ function isWRSize(size) {
 
 // ──────────────────────────────────────────────
 // Main parse function
+// Parser is CONSERVATIVE — only 0.95 confidence when product + size is crystal clear.
+// Everything ambiguous stays low confidence → GPT decides.
 // ──────────────────────────────────────────────
 function parse(text) {
   if (!text || typeof text !== "string") {
@@ -154,19 +149,19 @@ function parse(text) {
     mm: null,
   };
 
-  // 1. Detect intent from patterns
-  for (const [intent, patterns] of Object.entries(INTENT_PATTERNS)) {
+  // 1. Simple intents — greeting and thanks (only full-match, nothing else in message)
+  for (const [intent, patterns] of Object.entries(INTENT_HINTS)) {
     for (const pattern of patterns) {
       if (pattern.test(lower)) {
         result.intent = intent;
-        result.confidence = 0.9;
+        result.confidence = (intent === "greeting" || intent === "thanks") ? 0.95 : 0.7;
         break;
       }
     }
     if (result.intent !== "unknown") break;
   }
 
-  // 2. Detect category
+  // 2. Detect category keyword (wr / hb)
   for (const [cat, pattern] of Object.entries(CATEGORY_PATTERNS)) {
     if (pattern.test(lower)) {
       result.category = cat;
@@ -177,19 +172,17 @@ function parse(text) {
   // 3. Carbon type
   if (LC_PATTERN.test(lower)) result.carbonType = "lc";
 
-  // 4. Detect HB gauge explicitly: "12g", "3/0g", "3/0 gauge"
+  // 4. Detect HB gauge: "12g", "3/0g", "3/0 gauge"
   const gaugeMatch = GAUGE_REGEX.exec(lower);
   if (gaugeMatch) {
     result.gauge = gaugeMatch[1];
     if (!result.category) result.category = "hb";
-    result.confidence = Math.max(result.confidence, 0.95);
   }
   if (!result.gauge) {
     const slashMatch = SLASH_GAUGE_REGEX.exec(lower);
     if (slashMatch) {
       result.gauge = slashMatch[1];
       if (!result.category) result.category = "hb";
-      result.confidence = Math.max(result.confidence, 0.9);
     }
   }
 
@@ -203,7 +196,6 @@ function parse(text) {
       result.mm = String(avgMm);
       result.gauge = mmToGauge(avgMm);
       if (!result.category) result.category = "hb";
-      result.confidence = Math.max(result.confidence, 0.95);
     }
   }
 
@@ -216,7 +208,6 @@ function parse(text) {
         result.mm = mmSingle[1];
         result.gauge = mmToGauge(mmVal);
         if (!result.category) result.category = "hb";
-        result.confidence = Math.max(result.confidence, 0.85);
       }
     }
   }
@@ -232,7 +223,7 @@ function parse(text) {
     if (!result.unit) result.unit = "ton";
   }
 
-  // 8. Extract numbers for WR size detection
+  // 8. Extract numbers for WR size
   if (!result.gauge && !result.mm) {
     const allNumbers = [];
     let match;
@@ -244,7 +235,6 @@ function parse(text) {
     for (const num of allNumbers) {
       if (result.quantity && parseFloat(num.value) === result.quantity) continue;
       const asFloat = parseFloat(num.value);
-
       if (isWRSize(asFloat)) {
         result.size = num.value;
         if (AVAILABLE_WR_SIZES.includes(num.value)) {
@@ -254,12 +244,10 @@ function parse(text) {
           result.closestSizes = findClosestWRSizes(num.value);
         }
         if (!result.category) result.category = "wr";
-        result.confidence = Math.max(result.confidence, 0.85);
         break;
       }
     }
 
-    // Disambiguate quantity from bare numbers: "5.5 10" → size=5.5, qty=10
     if (result.size && !result.quantity && allNumbers.length >= 2) {
       for (const num of allNumbers) {
         if (num.value !== result.size) {
@@ -274,18 +262,40 @@ function parse(text) {
     }
   }
 
-  // 9. If product detected but intent still unknown → price inquiry
-  if (result.intent === "unknown" && (result.size || result.category || result.gauge || result.mm)) {
+  // 9. Confidence — only 0.95 when we have CLEAR product evidence
+  // "5.5 wr rate" → category=wr, size=5.5, price hint → 0.95
+  // "hb 12g rate" → category=hb, gauge=12, price hint → 0.95
+  // "5.3 se 5.4mm" → category=hb, mm detected → 0.95
+  // Everything else → low confidence → GPT decides
+  const hasProduct = result.category && (result.size || result.gauge || result.mm);
+  const hasPriceHint = result.intent === "price_inquiry";
+
+  if (hasProduct && hasPriceHint) {
     result.intent = "price_inquiry";
-    result.confidence = Math.max(result.confidence, 0.8);
+    result.confidence = 0.95;
+  } else if (hasProduct) {
+    result.intent = "price_inquiry";
+    result.confidence = 0.95;
+  } else if (result.intent === "greeting" || result.intent === "thanks") {
+    // already set to 0.95 above
+  } else {
+    // Not clear enough — let GPT handle
+    // Still pass extracted data as hints for GPT
+    if (result.intent === "unknown" && result.category) {
+      result.intent = "price_inquiry";
+      result.confidence = 0.7;
+    }
+    if (result.confidence === 0) {
+      result.confidence = 0;
+    }
   }
 
-  // 10. Detect very short messages that might be follow-ups
-  if (result.intent === "unknown" && raw.length <= 3) {
+  // 10. Short follow-up messages
+  if (result.intent === "unknown" && raw.length <= 5) {
     const c = raw.trim();
-    if (c === "?" || c === "." || c === "rate" || c === "Rate") {
+    if (c === "?" || c === "." || /^rate$/i.test(c) || c === "haan" || c === "ha") {
       result.intent = "follow_up";
-      result.confidence = 0.7;
+      result.confidence = 0.5;
     }
   }
 

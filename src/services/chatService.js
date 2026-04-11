@@ -161,13 +161,13 @@ const handleIncomingMessage = async (parsed) => {
     return;
   }
 
-  // ─── LAYER 2: Parser confident (>= 0.9) → template directly, NO GPT ───
+  // ─── LAYER 2: Parser confident (>= 0.95) → template directly, NO GPT ───
   let responseText = null;
   let usedGPT = false;
   let aiUsage = { totalTokens: 0 };
   let responseTimeMs = 0;
 
-  if (parsedIntent.confidence >= 0.9) {
+  if (parsedIntent.confidence >= 0.95) {
     // Default sizes when not specified
     if (parsedIntent.intent === "price_inquiry" && parsedIntent.category === "wr" && !parsedIntent.size) {
       parsedIntent.size = "5.5";
@@ -198,7 +198,7 @@ const handleIncomingMessage = async (parsed) => {
     }
   }
 
-  // ─── LAYER 3: Parser NOT confident OR order confirm → GPT ───
+  // ─── LAYER 3: Parser NOT confident (< 0.95) → GPT classifies ───
   if (!responseText) {
     logger.info(`[CHAT] L3 GPT — parser conf=${parsedIntent.confidence}, intent=${parsedIntent.intent}`);
 

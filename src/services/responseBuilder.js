@@ -7,7 +7,7 @@ const BRAND = "*Radhika Steel Raipur*";
 // ──────────────────────────────────────────────
 // WR Price Response
 // ──────────────────────────────────────────────
-const buildWRResponse = (price, quantity) => {
+const buildWRResponse = (price, quantity, askForSize = false) => {
   let msg = `${BRAND}\n\n`;
   msg += `*${price.label}*\n`;
   msg += `${INR(price.mergedBase)} + ${INR(price.fixedCharge)} + ${price.gstPercent}% GST\n`;
@@ -16,6 +16,11 @@ const buildWRResponse = (price, quantity) => {
   if (quantity && quantity > 0) {
     const grandTotal = Math.round(price.total * quantity);
     msg += `\n\n${quantity} ton × ${INR(price.total)} = *${INR(grandTotal)}*`;
+  }
+
+  if (askForSize) {
+    msg += `\n\n*Available:* 5.5 | 7 | 8 | 10 | 12 | 14 | 16 | 18mm`;
+    msg += `\n_Kaunsa size chahiye aapko?_`;
   }
 
   msg += `\n\n_Rate per ton (1000 kg) incl. GST_`;
@@ -210,9 +215,21 @@ const buildMinQtyError = (items) => {
 // ──────────────────────────────────────────────
 // Template responses
 // ──────────────────────────────────────────────
-const TEMPLATES = {
-  greeting: `${BRAND}\n\nNamaste! 🙏\nAap kis product ka rate chahiye?\n\n*WR:* 5.5 | 7 | 8 | 10 | 12 | 14 | 16 | 18mm\n*HB:* 6g se 14g, 1/0 se 6/0\n\n_Size bataiye, rate turant milega._`,
+const buildGreeting = async () => {
+  let msg = `${BRAND}\n\nNamaste! 🙏\n\nAaj ke rates:\n`;
+  try {
+    const wr = await pricingService.calculatePrice("wr", { size: "5.5", carbonType: "normal" });
+    msg += `\n▸ *WR 5.5mm* — *${INR(wr.total)}/ton*`;
+  } catch { /* skip */ }
+  try {
+    const hb = await pricingService.calculatePrice("hb", { gauge: "12" });
+    msg += `\n▸ *HB Wire 12g* — *${INR(hb.total)}/ton*`;
+  } catch { /* skip */ }
+  msg += `\n\nAapko kaunsa size chahiye? Bataiye.`;
+  return msg;
+};
 
+const TEMPLATES = {
   thanks: `${BRAND}\n\nDhanyawad! 🙏\nKoi aur madad chahiye toh batayein.`,
 
   negotiation: `${BRAND}\n\nAapki baat team tak pahuncha dete hain. Best rate ke saath jaldi reply milega. 🙏`,
@@ -232,7 +249,10 @@ const getTemplate = (key) => TEMPLATES[key] || null;
 const buildFromIntent = async (parsedIntent) => {
   const { intent, category, size, carbonType, quantity, gauge, mm, sizeAvailable } = parsedIntent;
 
-  if (intent === "greeting") return { text: TEMPLATES.greeting, usedGPT: false };
+  if (intent === "greeting") {
+    const text = await buildGreeting();
+    return { text, usedGPT: false };
+  }
   if (intent === "thanks") return { text: TEMPLATES.thanks, usedGPT: false };
   if (intent === "negotiation") return { text: TEMPLATES.negotiation, usedGPT: false, escalateToAdmin: true };
   if (intent === "delivery_inquiry") return { text: TEMPLATES.delivery_inquiry, usedGPT: false, escalateToAdmin: true };
@@ -240,6 +260,7 @@ const buildFromIntent = async (parsedIntent) => {
   if (intent === "price_inquiry" || intent === "follow_up") {
     if (category === "wr") {
       const wrSize = size || "5.5";
+      const askForSize = !size;
       const isAvailable = sizeAvailable !== false && ["5.5", "7", "8", "10", "12", "14", "16", "18"].includes(wrSize);
       if (!isAvailable) {
         const text = await buildUnavailableSizeResponse(wrSize, carbonType || "normal", quantity);
@@ -247,7 +268,7 @@ const buildFromIntent = async (parsedIntent) => {
       }
       try {
         const price = await pricingService.calculatePrice("wr", { size: wrSize, carbonType: carbonType || "normal" });
-        return { text: buildWRResponse(price, quantity), usedGPT: false };
+        return { text: buildWRResponse(price, quantity, askForSize), usedGPT: false };
       } catch (err) {
         logger.warn(`[RESPONSE] WR calc failed: ${err.message}`);
         return null;
@@ -277,7 +298,7 @@ const buildFromIntent = async (parsedIntent) => {
     if (!category) {
       try {
         const price = await pricingService.calculatePrice("wr", { size: "5.5", carbonType: "normal" });
-        return { text: buildWRResponse(price, quantity), usedGPT: false };
+        return { text: buildWRResponse(price, quantity, true), usedGPT: false };
       } catch (err) {
         logger.warn(`[RESPONSE] Default WR calc failed: ${err.message}`);
         return null;
@@ -299,6 +320,7 @@ module.exports = {
   buildMultiPriceResponse,
   buildOrderConfirmation,
   buildMinQtyError,
+  buildGreeting,
   buildFromIntent,
   getTemplate,
   TEMPLATES,
