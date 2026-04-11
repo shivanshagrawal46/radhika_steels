@@ -123,6 +123,7 @@ async function processOrderConfirmation(orderResult, conversation, user, io, fro
     // Link order to conversation
     conversation.stage = "order_confirmed";
     conversation.linkedOrder = order._id;
+    conversation.markModified("context");
     await conversation.save();
 
     io.to("employees").emit("order:new", {
@@ -166,6 +167,14 @@ const handleIncomingMessage = async (parsed) => {
   const isNewConversation = !conversation;
   if (!conversation) {
     conversation = await Conversation.create({ user: user._id, handlerType: "ai" });
+  }
+
+  // 2a. Ensure context subdocument exists (guards against old docs missing it)
+  if (!conversation.context) {
+    conversation.context = {};
+  }
+  if (!conversation.context.lastDetectedProduct) {
+    conversation.context.lastDetectedProduct = {};
   }
 
   // 2b. Auto-reset expired employee lock
@@ -304,9 +313,33 @@ const handleIncomingMessage = async (parsed) => {
   // ─── Multi-message order flow ───
   // When AI asked "kitna ton chahiye?", the user's next message is the answer.
   // Override whatever the parser detected — "5" is quantity, NOT WR 5mm.
-  const lastWasOrder = conversation.context?.lastIntent === "order_confirm";
+  logger.info(`[CHAT] L1c check: lastIntent="${conversation.context?.lastIntent}", stage="${conversation.stage}", productCtx="${conversation.context?.lastDetectedProduct?.category || "-"}"`);
+  let lastWasOrder = conversation.context?.lastIntent === "order_confirm";
   const orderNotYetCreated = conversation.stage !== "order_confirmed";
   const hasProductCtx = conversation.context?.lastDetectedProduct?.category;
+
+  // DB-backed fallback: if context.lastIntent wasn't persisted, check the last AI message
+  if (!lastWasOrder && orderNotYetCreated && hasProductCtx) {
+    try {
+      const lastAiMsg = await Message.findOne(
+        { conversation: conversation._id, "sender.type": "ai" },
+        { "content.text": 1 },
+        { sort: { createdAt: -1 } }
+      ).lean();
+      const lastAiText = (lastAiMsg?.content?.text || "").toLowerCase();
+      if (
+        lastAiText.includes("kitna ton") ||
+        lastAiText.includes("how many ton") ||
+        lastAiText.includes("quantity") ||
+        lastAiText.includes("kitni quantity")
+      ) {
+        lastWasOrder = true;
+        logger.info(`[CHAT] L1c DB-fallback: last AI msg was qty ask → treating as order flow`);
+      }
+    } catch (err) {
+      logger.warn(`[CHAT] L1c DB-fallback check failed: ${err.message}`);
+    }
+  }
 
   if (lastWasOrder && orderNotYetCreated && hasProductCtx) {
     const ctx = conversation.context.lastDetectedProduct;
@@ -366,6 +399,7 @@ const handleIncomingMessage = async (parsed) => {
   if (parsedIntent.intent === "negotiation") conversation.context.negotiationActive = true;
   if (parsedIntent.intent === "delivery_inquiry") conversation.context.deliveryInquiry = true;
   conversation.context.lastIntent = parsedIntent.intent;
+  conversation.markModified("context");
 
   // 8. Update conversation metadata
   conversation.messageCount += 1;
@@ -378,6 +412,7 @@ const handleIncomingMessage = async (parsed) => {
     timestamp: new Date(),
   };
   await conversation.save();
+  logger.info(`[CHAT] Context saved: lastIntent=${conversation.context.lastIntent}, product=${conversation.context.lastDetectedProduct?.category || "-"}, qty=${conversation.context.lastDetectedProduct?.quantity || 0}`);
 
   // 9. Mark read on WhatsApp
   whatsappService.markAsRead(waMessageId);
@@ -502,6 +537,7 @@ const handleIncomingMessage = async (parsed) => {
         if (!responseText && parsedIntent.category) {
           logger.info(`[CHAT] L3-ORDER: No items extracted — asking for quantity`);
           conversation.context.lastIntent = "order_confirm";
+          conversation.markModified("context");
           responseText = responseBuilder.buildOrderQuantityAsk(parsedIntent, text);
         }
       }
@@ -567,6 +603,7 @@ const handleIncomingMessage = async (parsed) => {
               const cat = finalIntent.category || parsedIntent.category;
               if (cat) {
                 conversation.context.lastIntent = "order_confirm";
+                conversation.markModified("context");
                 responseText = responseBuilder.buildOrderQuantityAsk({ ...parsedIntent, ...finalIntent, category: cat }, text);
               }
             }
@@ -670,6 +707,7 @@ const handleIncomingMessage = async (parsed) => {
     timestamp: new Date(),
   };
   conversation.lastMessageAt = new Date();
+  conversation.markModified("context");
   await conversation.save();
 
   // 13. Send via WhatsApp

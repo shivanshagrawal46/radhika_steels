@@ -44,8 +44,12 @@ const orderSchema = new mongoose.Schema(
   {
     orderNumber: {
       type: String,
-      required: true,
       unique: true,
+      default: function () {
+        const ts = Date.now().toString(36).toUpperCase();
+        const rand = Math.random().toString(36).substring(2, 6).toUpperCase();
+        return `RS-${ts}-${rand}`;
+      },
     },
     user: {
       type: mongoose.Schema.Types.ObjectId,
@@ -124,12 +128,7 @@ orderSchema.index({ status: 1, createdAt: -1 });
 orderSchema.index({ assignedTo: 1, status: 1 });
 orderSchema.index({ conversation: 1 });
 
-orderSchema.pre("save", function () {
-  if (this.isNew && !this.orderNumber) {
-    const ts = Date.now().toString(36).toUpperCase();
-    const rand = Math.random().toString(36).substring(2, 6).toUpperCase();
-    this.orderNumber = `RS-${ts}-${rand}`;
-  }
-});
+
+
 
 module.exports = mongoose.model("Order", orderSchema);
