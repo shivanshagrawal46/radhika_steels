@@ -71,6 +71,11 @@ const MM_SINGLE_REGEX = /(\d+(?:\.\d+)?)\s*(?:mm|dia|diameter|मिमी)/i;
 // Intent patterns — used for hint detection only, NOT for final decision
 // Parser only gets 0.95 when product+size is crystal clear
 const INTENT_HINTS = {
+  order_confirm: [
+    /(?:^|[\s,.])(?:book\s*kar|pakka\s*kar|confirm\s*kar|le\s*lo|lelo|ले\s*लो|बुक\s*कर|पक्का\s*कर)(?:o|do|iye|va|ो|ा|ें)?(?:$|[\s,.\?])/i,
+    /(?:^|[\s,.])(?:order\s*kar|final\s*kar|done\s*kar)(?:o|do|iye)?(?:$|[\s,.\?])/i,
+    /(?:^|[\s,.])(?:confirm\s*hai|pakka\s*hai|done\s*hai|book\s*hai)(?:$|[\s,.\?])/i,
+  ],
   price_inquiry: [
     /(?:^|[\s,.])(?:rate|rates|price|prices|bhav|भाव|kya\s*rate|क्या\s*रेट|quote|quotation)(?:$|[\s,.\?])/i,
     /(?:^|[\s,.])(?:aaj\s*ka\s*rate|today.?s?\s*rate|current\s*rate|latest\s*rate|new\s*rate)(?:$|[\s,.\?])/i,
@@ -267,11 +272,14 @@ function parse(text) {
   // "5.5 wr rate" → category=wr, size=5.5, price hint → 0.95
   // "hb 12g rate" → category=hb, gauge=12, price hint → 0.95
   // "5.3 se 5.4mm" → category=hb, mm detected → 0.95
+  // "5.5 3 ton book karo" → order_confirm (NEVER override to price_inquiry!)
   // Everything else → low confidence → GPT decides
   const hasProduct = result.category && (result.size || result.gauge || result.mm);
-  const hasPriceHint = result.intent === "price_inquiry";
 
-  if (hasProduct) {
+  if (result.intent === "order_confirm") {
+    // Keep order_confirm — NEVER override. Low confidence forces GPT verification.
+    result.confidence = 0.7;
+  } else if (hasProduct) {
     result.intent = "price_inquiry";
     result.confidence = 0.95;
   } else if (result.intent === "greeting" || result.intent === "thanks") {

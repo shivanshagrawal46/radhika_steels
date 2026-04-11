@@ -247,17 +247,31 @@ const handleIncomingMessage = async (parsed) => {
   logger.info(`[CHAT] L1 Parser: intent=${parsedIntent.intent}, cat=${parsedIntent.category || "-"}, conf=${parsedIntent.confidence}`);
 
   // 7. LAYER 1b — Reply-to context enrichment
-  if (parsedIntent.intent === "follow_up" && replyToContext) {
+  if (replyToContext) {
     const oldParsed = intentParser.parse(replyToContext.text);
-    if (oldParsed.category) {
+
+    if (parsedIntent.intent === "follow_up" && oldParsed.category) {
       parsedIntent.category = oldParsed.category;
       parsedIntent.size = oldParsed.size;
       parsedIntent.gauge = oldParsed.gauge;
       parsedIntent.mm = oldParsed.mm;
       parsedIntent.carbonType = oldParsed.carbonType;
       parsedIntent.intent = "price_inquiry";
-      parsedIntent.confidence = 0.85;
-      logger.info(`[CHAT] L1b Reply-to enriched: cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge}`);
+      parsedIntent.confidence = 0.9;
+      logger.info(`[CHAT] L1b Reply-to enriched (follow_up): cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge}`);
+    }
+
+    // If user replies to an old message with "book karo" / "confirm karo",
+    // carry over the product details from the replied-to message
+    if (parsedIntent.intent === "order_confirm" && oldParsed.category && !parsedIntent.category) {
+      parsedIntent.category = oldParsed.category;
+      parsedIntent.size = oldParsed.size;
+      parsedIntent.gauge = oldParsed.gauge;
+      parsedIntent.mm = oldParsed.mm;
+      parsedIntent.carbonType = oldParsed.carbonType;
+      parsedIntent.quantity = oldParsed.quantity || parsedIntent.quantity;
+      parsedIntent.unit = oldParsed.unit || parsedIntent.unit;
+      logger.info(`[CHAT] L1b Reply-to enriched (order_confirm): cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge}, qty=${parsedIntent.quantity}`);
     }
   }
 
@@ -267,10 +281,24 @@ const handleIncomingMessage = async (parsed) => {
     parsedIntent.category = ctx.category;
     parsedIntent.size = ctx.size || null;
     parsedIntent.gauge = ctx.gauge || null;
+    parsedIntent.mm = ctx.mm || null;
     parsedIntent.carbonType = ctx.carbonType || "normal";
     parsedIntent.intent = "price_inquiry";
-    parsedIntent.confidence = 0.8;
-    logger.info(`[CHAT] L1b Context enriched: cat=${parsedIntent.category}, size=${parsedIntent.size}`);
+    parsedIntent.confidence = 0.9;
+    logger.info(`[CHAT] L1b Context enriched: cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge || parsedIntent.mm}`);
+  }
+
+  // If order_confirm but no product details from text and no reply-to, carry over from conversation context
+  if (parsedIntent.intent === "order_confirm" && !parsedIntent.category && !replyToContext && conversation.context?.lastDetectedProduct?.category) {
+    const ctx = conversation.context.lastDetectedProduct;
+    parsedIntent.category = ctx.category;
+    parsedIntent.size = ctx.size || null;
+    parsedIntent.gauge = ctx.gauge || null;
+    parsedIntent.mm = ctx.mm || null;
+    parsedIntent.carbonType = ctx.carbonType || "normal";
+    parsedIntent.quantity = parsedIntent.quantity || ctx.quantity || null;
+    parsedIntent.unit = parsedIntent.unit || ctx.unit || "ton";
+    logger.info(`[CHAT] L1b Context enriched (order_confirm): cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge}, qty=${parsedIntent.quantity}`);
   }
 
   // Update conversation context
@@ -286,6 +314,7 @@ const handleIncomingMessage = async (parsed) => {
       quantity: parsedIntent.quantity || 0,
       unit: parsedIntent.unit || "",
       gauge: parsedIntent.gauge || "",
+      mm: parsedIntent.mm || "",
     };
   }
   if (parsedIntent.intent === "negotiation") conversation.context.negotiationActive = true;
@@ -322,8 +351,8 @@ const handleIncomingMessage = async (parsed) => {
   let aiUsage = { totalTokens: 0 };
   let responseTimeMs = 0;
 
-  // ─── LAYER 2: Parser confident (>= 0.95) → template directly ───
-  if (parsedIntent.confidence >= 0.95) {
+  // ─── LAYER 2: Parser confident (>= 0.9) → template directly ───
+  if (parsedIntent.confidence >= 0.9) {
     if (parsedIntent.intent === "price_inquiry" && parsedIntent.category === "wr" && !parsedIntent.size) {
       parsedIntent.size = "5.5";
       parsedIntent.sizeAvailable = true;
@@ -377,13 +406,49 @@ const handleIncomingMessage = async (parsed) => {
       const isOrderIntent = parsedIntent.intent === "order_confirm";
       if (isOrderIntent) {
         logger.info(`[CHAT] L3-ORDER: Verifying with GPT...`);
-        const { result: orderResult, usage, responseTimeMs: rTime } = await openaiService.verifyOrder(chatHistory);
+
+        // If user replied to an old message, inject it at the top so GPT sees the
+        // original product/quantity context even if it's older than the last 7 messages
+        let orderChatHistory = chatHistory;
+        if (replyToContext && replyToContext.text) {
+          const replyRole = replyToContext.senderType === "user" ? "user" : "assistant";
+          const alreadyInHistory = chatHistory.some(
+            (m) => m.content === replyToContext.text && m.role === replyRole
+          );
+          if (!alreadyInHistory) {
+            orderChatHistory = [
+              { role: replyRole, content: `[REPLIED-TO MESSAGE]: ${replyToContext.text}` },
+              ...chatHistory,
+            ];
+            logger.info(`[CHAT] L3-ORDER: Injected reply-to message into GPT context`);
+          }
+        }
+
+        const { result: orderResult, usage, responseTimeMs: rTime } = await openaiService.verifyOrder(orderChatHistory);
         aiUsage = usage;
         responseTimeMs = rTime;
         usedGPT = true;
 
         if (orderResult && orderResult.is_order && orderResult.items?.length > 0) {
           const orderRes = await processOrderConfirmation(orderResult, conversation, user, io, from, displayName);
+          if (orderRes) responseText = orderRes;
+        }
+
+        // Fallback: GPT couldn't extract items but parser enriched from reply-to context
+        if (!responseText && parsedIntent.category && parsedIntent.quantity) {
+          logger.info(`[CHAT] L3-ORDER: GPT couldn't extract, using parser-enriched items`);
+          const fallbackResult = {
+            is_order: true,
+            items: [{
+              category: parsedIntent.category,
+              size: parsedIntent.size || null,
+              gauge: parsedIntent.gauge || null,
+              mm: parsedIntent.mm || null,
+              carbon_type: parsedIntent.carbonType || "normal",
+              quantity: parsedIntent.quantity,
+            }],
+          };
+          const orderRes = await processOrderConfirmation(fallbackResult, conversation, user, io, from, displayName);
           if (orderRes) responseText = orderRes;
         }
       }
@@ -421,7 +486,20 @@ const handleIncomingMessage = async (parsed) => {
 
           // GPT detected order_confirm
           if (classified.intent === "order_confirm") {
-            const { result: orderResult, usage: ou, responseTimeMs: ot } = await openaiService.verifyOrder(chatHistory);
+            let gptOrderHistory = chatHistory;
+            if (replyToContext && replyToContext.text) {
+              const replyRole = replyToContext.senderType === "user" ? "user" : "assistant";
+              const alreadyInHistory = chatHistory.some(
+                (m) => m.content === replyToContext.text && m.role === replyRole
+              );
+              if (!alreadyInHistory) {
+                gptOrderHistory = [
+                  { role: replyRole, content: `[REPLIED-TO MESSAGE]: ${replyToContext.text}` },
+                  ...chatHistory,
+                ];
+              }
+            }
+            const { result: orderResult, usage: ou, responseTimeMs: ot } = await openaiService.verifyOrder(gptOrderHistory);
             aiUsage.totalTokens += ou.totalTokens;
             responseTimeMs += ot;
             usedGPT = true;

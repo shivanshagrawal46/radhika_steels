@@ -307,13 +307,20 @@ const buildFromIntent = async (parsedIntent) => {
         const price = await pricingService.calculatePrice("wr", { size: wrSize, carbonType: carbonType || "normal" });
         return { text: buildWRResponse(price, quantity, askForSize), usedGPT: false };
       } catch (err) {
-        logger.warn(`[RESPONSE] WR calc failed: ${err.message}`);
-        return null;
+        logger.warn(`[RESPONSE] WR calc failed (attempt 1): ${err.message} — clearing cache`);
+        pricingService.clearRateCache();
+        try {
+          const price = await pricingService.calculatePrice("wr", { size: wrSize, carbonType: carbonType || "normal" });
+          return { text: buildWRResponse(price, quantity, askForSize), usedGPT: false };
+        } catch (err2) {
+          logger.error(`[RESPONSE] WR calc failed (attempt 2): ${err2.message}`);
+          return { text: `Radhika Steel Raipur\n\nWR ${wrSize}mm ka rate abhi system mein update ho raha hai. Thodi der mein dobara try karein.`, usedGPT: false };
+        }
       }
     }
 
     if (category === "hb") {
-      try {
+      const tryCalcHB = async () => {
         let price;
         let askForMm = false;
         if (mm) {
@@ -325,10 +332,22 @@ const buildFromIntent = async (parsedIntent) => {
           price = await pricingService.calculatePrice("hb", { gauge: "12" });
           askForMm = true;
         }
+        return { price, askForMm };
+      };
+
+      try {
+        const { price, askForMm } = await tryCalcHB();
         return { text: buildHBResponse(price, quantity, askForMm), usedGPT: false };
       } catch (err) {
-        logger.warn(`[RESPONSE] HB calc failed: ${err.message}`);
-        return null;
+        logger.warn(`[RESPONSE] HB calc failed (attempt 1): ${err.message} — clearing cache and retrying`);
+        pricingService.clearRateCache();
+        try {
+          const { price, askForMm } = await tryCalcHB();
+          return { text: buildHBResponse(price, quantity, askForMm), usedGPT: false };
+        } catch (err2) {
+          logger.error(`[RESPONSE] HB calc failed (attempt 2): ${err2.message}`);
+          return { text: `Radhika Steel Raipur\n\nHB Wire ${gauge || mm || ""}${gauge ? "g" : "mm"} ka rate abhi system mein update ho raha hai. Thodi der mein dobara try karein ya humse seedha baat karein.`, usedGPT: false };
+        }
       }
     }
 
@@ -338,7 +357,11 @@ const buildFromIntent = async (parsedIntent) => {
         return { text: buildWRResponse(price, quantity, true), usedGPT: false };
       } catch (err) {
         logger.warn(`[RESPONSE] Default WR calc failed: ${err.message}`);
-        return null;
+        pricingService.clearRateCache();
+        try {
+          const price = await pricingService.calculatePrice("wr", { size: "5.5", carbonType: "normal" });
+          return { text: buildWRResponse(price, quantity, true), usedGPT: false };
+        } catch { return null; }
       }
     }
   }

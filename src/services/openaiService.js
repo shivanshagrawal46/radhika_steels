@@ -334,7 +334,7 @@ ton = tons = tonne = mt = mts = metric ton (all same). "dia"/"diameter" = mm siz
  */
 const ORDER_VERIFY_PROMPT = `You are the order extraction AI for Radhika Steel Raipur.
 
-Look at the last 6-7 messages and determine:
+Look at the conversation history and determine:
 1. Is the customer genuinely confirming/placing an order? (not just asking prices)
 2. What items do they want to order? Extract ALL items with quantities.
 
@@ -349,12 +349,24 @@ QUANTITY RULES:
 - ton = tons = tonne = tonnes = mt = mts = m.t. = metric ton — ALL SAME (1 ton = 1000 kg)
 - "dia" / "diameter" = just means mm size. Determine WR/HB from the value.
 
+REPLY-TO CONTEXT:
+- Messages prefixed with "[REPLIED-TO MESSAGE]:" are the original message the customer replied to.
+- When customer replies "book karo" / "confirm karo" / "ye le lo" to an old price message,
+  they want to ORDER the items from that original price message.
+- Extract the product details and quantity from the replied-to message.
+- Example: User replies "book karo" to a message that showed "WR 5.5mm 5 ton ka rate: ₹47,607/ton"
+  → Extract: WR 5.5mm, 5 ton, confirmed.
+- If the replied-to message is a price breakdown from our system (starts with "Radhika Steel Raipur"),
+  parse the product and quantity from the breakdown shown in that message.
+
 LANGUAGE: Hindi/Hinglish/English mixed. Examples:
 - "5.5 3 ton aur hb 5g 5.2 se 5.3mm 2 ton book karo" = WR 5.5mm 3 ton + HB 5g 2 ton
 - "pakka karo 12mm 5 ton" = WR 12mm 5 ton confirmed
 - "le lo 10 ton 5.5" = WR 5.5mm 10 ton confirmed
 - "5.5 dia 5 mts book karo" = 5.5mm (WR size) 5 ton confirmed
 - "8 dia 3 mts aur hb 12g 2 mts le lo" = WR 8mm 3 ton + HB 12g 2 ton confirmed
+- User replies "ye confirm karo" to old message showing "WR 12mm 5 ton" = WR 12mm 5 ton confirmed
+- User replies "book karo" to old price quote = order those exact items
 
 Return ONLY the function call.`;
 

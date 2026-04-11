@@ -223,6 +223,11 @@ const updateBaseRate = async (wrBaseRate, employeeId, overrides = {}) => {
   return newRate;
 };
 
+const clearRateCache = () => {
+  _cachedRate = null;
+  _cacheTs = 0;
+};
+
 module.exports = {
   GAUGE_MM_TABLE,
   ALL_HB_GAUGES,
@@ -233,4 +238,5 @@ module.exports = {
   getFullPriceTable,
   buildPriceContext,
   updateBaseRate,
+  clearRateCache,
 };
