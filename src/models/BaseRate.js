@@ -2,14 +2,12 @@ const mongoose = require("mongoose");
 
 const baseRateSchema = new mongoose.Schema(
   {
-    // The single WR base rate that drives all pricing
     wrBaseRate: {
       type: Number,
       required: true,
       min: 0,
     },
 
-    // Size premiums (added to base rate depending on mm)
     sizePremiums: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({
@@ -24,7 +22,6 @@ const baseRateSchema = new mongoose.Schema(
       }),
     },
 
-    // Carbon-type extras
     carbonExtras: {
       type: mongoose.Schema.Types.Mixed,
       default: () => ({
@@ -33,19 +30,28 @@ const baseRateSchema = new mongoose.Schema(
       }),
     },
 
-    // HB premium over WR base
     hbPremium: {
       type: Number,
       default: 2500,
     },
 
-    // Fixed charge added to every rate
+    hbGaugePremiums: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({
+        "6": 0, "7": 0, "8": 0, "9": 0, "10": 0, "11": 0, "12": 0,
+        "13": 1000,
+        "14": 1700,
+        "5": 800, "4": 800, "3": 800, "2": 800, "1": 800,
+        "1/0": 800, "2/0": 800,
+        "3/0": 1200, "4/0": 1200, "5/0": 1200, "6/0": 1200,
+      }),
+    },
+
     fixedCharge: {
       type: Number,
       default: 345,
     },
 
-    // GST percentage
     gstPercent: {
       type: Number,
       default: 18,
@@ -62,9 +68,7 @@ const baseRateSchema = new mongoose.Schema(
       default: null,
     },
   },
-  {
-    timestamps: true,
-  }
+  { timestamps: true }
 );
 
 baseRateSchema.index({ isActive: 1, createdAt: -1 });

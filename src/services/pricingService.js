@@ -3,244 +3,231 @@ const logger = require("../config/logger");
 const AppError = require("../utils/AppError");
 
 // ──────────────────────────────────────────────
-// Pricing Rules (WR & HB)
-//
-//   WR formula:
-//     subtotal = wrBaseRate + sizePremium + carbonExtra + fixedCharge
-//     gst      = subtotal × (gstPercent / 100)
-//     total    = subtotal + gst
-//
-//   HB formula:
-//     hbBase   = wrBaseRate + hbPremium   (e.g. +2500)
-//     subtotal = hbBase + fixedCharge
-//     gst      = subtotal × (gstPercent / 100)
-//     total    = subtotal + gst
+// HB Wire Gauge ↔ MM conversion table (SWG standard — never changes)
 // ──────────────────────────────────────────────
+const GAUGE_MM_TABLE = [
+  { gauge: "6/0", minMm: 11.00, maxMm: 11.80 },
+  { gauge: "5/0", minMm: 10.40, maxMm: 11.00 },
+  { gauge: "4/0", minMm: 9.80, maxMm: 10.40 },
+  { gauge: "3/0", minMm: 9.20, maxMm: 9.80 },
+  { gauge: "2/0", minMm: 8.60, maxMm: 9.20 },
+  { gauge: "1/0", minMm: 7.80, maxMm: 8.60 },
+  { gauge: "1", minMm: 7.20, maxMm: 7.80 },
+  { gauge: "2", minMm: 6.80, maxMm: 7.20 },
+  { gauge: "3", minMm: 6.20, maxMm: 6.80 },
+  { gauge: "4", minMm: 5.60, maxMm: 6.20 },
+  { gauge: "5", minMm: 5.20, maxMm: 5.60 },
+  { gauge: "6", minMm: 4.80, maxMm: 5.20 },
+  { gauge: "7", minMm: 4.40, maxMm: 4.80 },
+  { gauge: "8", minMm: 3.80, maxMm: 4.40 },
+  { gauge: "9", minMm: 3.40, maxMm: 3.80 },
+  { gauge: "10", minMm: 3.00, maxMm: 3.40 },
+  { gauge: "11", minMm: 2.80, maxMm: 3.00 },
+  { gauge: "12", minMm: 2.40, maxMm: 2.80 },
+  { gauge: "13", minMm: 2.20, maxMm: 2.40 },
+  { gauge: "14", minMm: 1.90, maxMm: 2.20 },
+  { gauge: "15", minMm: 1.75, maxMm: 1.90 },
+  { gauge: "16", minMm: 1.60, maxMm: 1.75 },
+];
 
+const ALL_HB_GAUGES = [
+  "6/0", "5/0", "4/0", "3/0", "2/0", "1/0",
+  "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
+  "13", "14",
+];
+
+function mmToGauge(mm) {
+  const val = parseFloat(mm);
+  if (isNaN(val)) return null;
+  for (const row of GAUGE_MM_TABLE) {
+    if (val >= row.minMm && val <= row.maxMm) return row;
+  }
+  let closest = null;
+  let minDist = Infinity;
+  for (const row of GAUGE_MM_TABLE) {
+    const mid = (row.minMm + row.maxMm) / 2;
+    const dist = Math.abs(val - mid);
+    if (dist < minDist) { minDist = dist; closest = row; }
+  }
+  return closest;
+}
+
+function gaugeToMmRange(gauge) {
+  return GAUGE_MM_TABLE.find((r) => r.gauge === gauge) || null;
+}
+
+// ──────────────────────────────────────────────
+// Rate cache
+// ──────────────────────────────────────────────
 let _cachedRate = null;
 let _cacheTs = 0;
 const RATE_CACHE_TTL = 30_000;
 
-/**
- * Fetch the currently active base-rate document.
- * Cached in-memory for 30 s so chat messages don't hit DB every time.
- */
 const getActiveBaseRate = async () => {
   const now = Date.now();
   if (_cachedRate && now - _cacheTs < RATE_CACHE_TTL) return _cachedRate;
-
-  const rate = await BaseRate.findOne({ isActive: true })
-    .sort({ createdAt: -1 })
-    .lean();
-
+  const rate = await BaseRate.findOne({ isActive: true }).sort({ createdAt: -1 }).lean();
   if (!rate) throw new AppError("No active base rate configured. Ask admin to set one.", 404);
-
   _cachedRate = rate;
   _cacheTs = now;
   return rate;
 };
 
-/**
- * Calculate the price for a WR product.
- *
- * @param {object} rate  - active BaseRate document (lean)
- * @param {string} size  - e.g. "5.5", "7", "12"
- * @param {string} carbonType - "normal" | "lc"
- * @returns {{ breakdown, subtotal, gst, total, displayLine1, displayLine2 }}
- */
 const lookup = (obj, key) => {
   if (!obj) return undefined;
-  if (obj instanceof Map) return obj.get(key);
-  return obj[key];
+  if (obj instanceof Map) return obj.get(String(key));
+  return obj[String(key)];
 };
 
+// ──────────────────────────────────────────────
+// WR Price Calculation
+// ──────────────────────────────────────────────
 const calcWR = (rate, size, carbonType = "normal") => {
-  const sizePremium = lookup(rate.sizePremiums, size) ?? null;
-  if (sizePremium === null) {
-    throw new AppError(`No size premium configured for WR ${size}mm`, 400);
+  const sizePremium = lookup(rate.sizePremiums, size);
+  if (sizePremium === undefined || sizePremium === null) {
+    throw new AppError(`WR ${size}mm is not available`, 400);
   }
-
   const carbonExtra = lookup(rate.carbonExtras, carbonType) ?? 0;
   const { wrBaseRate, fixedCharge, gstPercent } = rate;
 
-  const subtotal = wrBaseRate + sizePremium + carbonExtra + fixedCharge;
-  const gst = Math.round((subtotal * gstPercent) / 100 * 100) / 100;
-  const total = Math.round((subtotal + gst) * 100) / 100;
-
-  // Build display strings — all rates are per ton (1000 kg)
-  const parts = [`₹${wrBaseRate.toLocaleString("en-IN")}`];
-  if (sizePremium > 0) parts.push(`+ ₹${sizePremium.toLocaleString("en-IN")}`);
-  if (carbonExtra > 0) parts.push(`+ ₹${carbonExtra.toLocaleString("en-IN")} (LC)`);
-  parts.push(`+ ₹${fixedCharge} + ${gstPercent}% GST`);
-
-  const displayLine1 = parts.join(" ");
-  const displayLine2 = `Total: ₹${total.toLocaleString("en-IN")}/ton`;
+  const mergedBase = wrBaseRate + sizePremium + carbonExtra;
+  const subtotal = mergedBase + fixedCharge;
+  const gst = Math.round((subtotal * gstPercent) / 100);
+  const total = subtotal + gst;
 
   return {
     category: "wr",
     size,
     carbonType,
     unit: "ton",
-    breakdown: {
-      baseRate: wrBaseRate,
-      sizePremium,
-      carbonExtra,
-      fixedCharge,
-      gstPercent,
-    },
+    mergedBase,
+    fixedCharge,
+    gstPercent,
     subtotal,
     gst,
     total,
-    displayLine1,
-    displayLine2,
+    label: `WR ${size}mm${carbonType === "lc" ? " LC" : ""}`,
   };
 };
 
-/**
- * Calculate the price for an HB product.
- *
- * @param {object} rate  - active BaseRate document (lean)
- * @param {string} gauge - e.g. "12" (12 gauge is the base)
- * @returns {{ breakdown, subtotal, gst, total, displayLine1, displayLine2 }}
- */
+// ──────────────────────────────────────────────
+// HB Price Calculation
+// ──────────────────────────────────────────────
 const calcHB = (rate, gauge = "12") => {
+  const gaugePremium = lookup(rate.hbGaugePremiums, gauge);
+  if (gaugePremium === undefined || gaugePremium === null) {
+    throw new AppError(`HB Wire ${gauge}g is not available`, 400);
+  }
   const { wrBaseRate, hbPremium, fixedCharge, gstPercent } = rate;
 
   const hbBase = wrBaseRate + hbPremium;
-  const subtotal = hbBase + fixedCharge;
-  const gst = Math.round((subtotal * gstPercent) / 100 * 100) / 100;
-  const total = Math.round((subtotal + gst) * 100) / 100;
+  const mergedBase = hbBase + gaugePremium;
+  const subtotal = mergedBase + fixedCharge;
+  const gst = Math.round((subtotal * gstPercent) / 100);
+  const total = subtotal + gst;
 
-  const displayLine1 = `₹${wrBaseRate.toLocaleString("en-IN")} + ₹${hbPremium.toLocaleString("en-IN")} (HB) + ₹${fixedCharge} + ${gstPercent}% GST`;
-  const displayLine2 = `Total: ₹${total.toLocaleString("en-IN")}/ton`;
+  const mmRange = gaugeToMmRange(gauge);
+  const mmLabel = mmRange ? ` (${mmRange.minMm}-${mmRange.maxMm}mm)` : "";
 
   return {
     category: "hb",
     gauge,
+    mmRange,
     unit: "ton",
-    breakdown: {
-      wrBaseRate,
-      hbPremium,
-      hbBase,
-      fixedCharge,
-      gstPercent,
-    },
+    mergedBase,
+    fixedCharge,
+    gstPercent,
     subtotal,
     gst,
     total,
-    displayLine1,
-    displayLine2,
+    label: `HB Wire ${gauge}g${mmLabel}`,
   };
 };
 
-/**
- * Calculate price for any supported category.
- */
-const calculatePrice = async (category, options = {}) => {
-  const rate = await getActiveBaseRate();
-
-  switch (category) {
-    case "wr":
-      return calcWR(rate, options.size || "5.5", options.carbonType || "normal");
-
-    case "hb":
-      return calcHB(rate, options.gauge || "12");
-
-    default:
-      throw new AppError(`Pricing not yet configured for category: ${category}`, 400);
-  }
+// ──────────────────────────────────────────────
+// HB Price by MM size (user says "5.3mm" → find gauge → calculate)
+// ──────────────────────────────────────────────
+const calcHBByMm = (rate, mm) => {
+  const row = mmToGauge(mm);
+  if (!row) throw new AppError(`Cannot find gauge for ${mm}mm`, 400);
+  return calcHB(rate, row.gauge);
 };
 
-/**
- * Get a full price table (all WR sizes + HB) — used for AI context & dashboard.
- */
+// ──────────────────────────────────────────────
+// Public API
+// ──────────────────────────────────────────────
+const calculatePrice = async (category, options = {}) => {
+  const rate = await getActiveBaseRate();
+  if (category === "wr") {
+    return calcWR(rate, options.size || "5.5", options.carbonType || "normal");
+  }
+  if (category === "hb") {
+    if (options.mm) return calcHBByMm(rate, options.mm);
+    return calcHB(rate, options.gauge || "12");
+  }
+  throw new AppError(`Pricing not configured for: ${category}`, 400);
+};
+
 const getFullPriceTable = async () => {
   const rate = await getActiveBaseRate();
-
   const sp = rate.sizePremiums || {};
   const ce = rate.carbonExtras || {};
   const wrSizes = Object.keys(sp instanceof Map ? Object.fromEntries(sp) : sp);
   const carbonTypes = Object.keys(ce instanceof Map ? Object.fromEntries(ce) : ce);
 
-  const wrPrices = [];
+  const wr = [];
   for (const size of wrSizes) {
     for (const ct of carbonTypes) {
-      wrPrices.push(calcWR(rate, size, ct));
+      wr.push(calcWR(rate, size, ct));
     }
   }
 
-  const hbPrices = [calcHB(rate, "12")];
+  const hb = [];
+  for (const g of ALL_HB_GAUGES) {
+    try { hb.push(calcHB(rate, g)); } catch { /* skip unconfigured */ }
+  }
 
-  return {
-    wrBaseRate: rate.wrBaseRate,
-    updatedAt: rate.updatedAt,
-    wr: wrPrices,
-    hb: hbPrices,
-  };
+  return { wrBaseRate: rate.wrBaseRate, updatedAt: rate.updatedAt, wr, hb };
 };
 
-/**
- * Build a human-readable price context string for OpenAI.
- */
 const buildPriceContext = async () => {
   try {
     const table = await getFullPriceTable();
-
     const lines = [
-      `Current Steel Prices — ALL RATES ARE PER TON (1 ton = 1000 kg)`,
-      `Base Rate: ₹${table.wrBaseRate.toLocaleString("en-IN")}/ton | Updated: ${new Date(table.updatedAt).toLocaleDateString("en-IN")}`,
+      `Steel Prices — ALL RATES PER TON`,
+      `Base: ₹${table.wrBaseRate.toLocaleString("en-IN")}/ton`,
       "",
+      "WR sizes: " + table.wr.map((p) => `${p.label}: ₹${p.total.toLocaleString("en-IN")}/ton`).join(" | "),
+      "",
+      "HB gauges: " + table.hb.map((p) => `${p.label}: ₹${p.total.toLocaleString("en-IN")}/ton`).join(" | "),
     ];
-
-    lines.push("=== Wire Rod (WR) — Rate per ton ===");
-    for (const p of table.wr) {
-      const label = p.carbonType === "lc" ? `${p.size}mm LC` : `${p.size}mm`;
-      lines.push(`  ${label}: ${p.displayLine1}`);
-      lines.push(`         ${p.displayLine2}`);
-    }
-
-    lines.push("");
-    lines.push("=== HB Wire — Rate per ton ===");
-    for (const p of table.hb) {
-      lines.push(`  ${p.gauge}g: ${p.displayLine1}`);
-      lines.push(`      ${p.displayLine2}`);
-    }
-
     return lines.join("\n");
   } catch {
-    return "No product prices are currently available. Ask admin to set the base rate.";
+    return "No prices available. Admin needs to set the base rate.";
   }
 };
 
-/**
- * Admin updates the WR base rate → all prices recalculate dynamically.
- */
 const updateBaseRate = async (wrBaseRate, employeeId, overrides = {}) => {
   _cachedRate = null;
   _cacheTs = 0;
-
   await BaseRate.updateMany({ isActive: true }, { isActive: false });
-
-  const rateData = {
-    wrBaseRate,
-    isActive: true,
-    updatedBy: employeeId,
-  };
-
+  const rateData = { wrBaseRate, isActive: true, updatedBy: employeeId };
   if (overrides.hbPremium !== undefined) rateData.hbPremium = overrides.hbPremium;
   if (overrides.fixedCharge !== undefined) rateData.fixedCharge = overrides.fixedCharge;
   if (overrides.gstPercent !== undefined) rateData.gstPercent = overrides.gstPercent;
   if (overrides.sizePremiums) rateData.sizePremiums = overrides.sizePremiums;
   if (overrides.carbonExtras) rateData.carbonExtras = overrides.carbonExtras;
-
+  if (overrides.hbGaugePremiums) rateData.hbGaugePremiums = overrides.hbGaugePremiums;
   const newRate = await BaseRate.create(rateData);
-
   logger.info(`Base rate updated to ₹${wrBaseRate} by employee ${employeeId}`);
-
   return newRate;
 };
 
 module.exports = {
+  GAUGE_MM_TABLE,
+  ALL_HB_GAUGES,
+  mmToGauge,
+  gaugeToMmRange,
   getActiveBaseRate,
   calculatePrice,
   getFullPriceTable,
