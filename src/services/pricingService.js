@@ -36,6 +36,14 @@ const ALL_HB_GAUGES = [
   "13", "14", "15", "16",
 ];
 
+const DEFAULT_HB_GAUGE_PREMIUMS = {
+  "6": 0, "7": 0, "8": 0, "9": 0, "10": 0, "11": 0, "12": 0,
+  "13": 1000, "14": 1700, "15": 1700, "16": 1700,
+  "5": 800, "4": 800, "3": 800, "2": 800, "1": 800,
+  "1/0": 800, "2/0": 800,
+  "3/0": 1200, "4/0": 1200, "5/0": 1200, "6/0": 1200,
+};
+
 function mmToGauge(mm) {
   const val = parseFloat(mm);
   if (isNaN(val)) return null;
@@ -63,11 +71,26 @@ let _cachedRate = null;
 let _cacheTs = 0;
 const RATE_CACHE_TTL = 30_000;
 
+const DEFAULT_SIZE_PREMIUMS = {
+  "5.5": 0, "7": 800, "8": 800, "10": 800,
+  "12": 1200, "14": 1500, "16": 1700, "18": 2200,
+};
+const DEFAULT_CARBON_EXTRAS = { normal: 0, lc: 800 };
+
 const getActiveBaseRate = async () => {
   const now = Date.now();
   if (_cachedRate && now - _cacheTs < RATE_CACHE_TTL) return _cachedRate;
   const rate = await BaseRate.findOne({ isActive: true }).sort({ createdAt: -1 }).lean();
   if (!rate) throw new AppError("No active base rate configured. Ask admin to set one.", 404);
+
+  // Normalize — merge DB data over hardcoded defaults so every field is guaranteed present
+  rate.sizePremiums = { ...DEFAULT_SIZE_PREMIUMS, ...(rate.sizePremiums || {}) };
+  rate.carbonExtras = { ...DEFAULT_CARBON_EXTRAS, ...(rate.carbonExtras || {}) };
+  rate.hbGaugePremiums = { ...DEFAULT_HB_GAUGE_PREMIUMS, ...(rate.hbGaugePremiums || {}) };
+  rate.hbPremium = rate.hbPremium ?? 2500;
+  rate.fixedCharge = rate.fixedCharge ?? 345;
+  rate.gstPercent = rate.gstPercent ?? 18;
+
   _cachedRate = rate;
   _cacheTs = now;
   return rate;
@@ -210,14 +233,32 @@ const buildPriceContext = async () => {
 const updateBaseRate = async (wrBaseRate, employeeId, overrides = {}) => {
   _cachedRate = null;
   _cacheTs = 0;
+
+  // Grab previous active rate to carry forward premiums/config
+  const prevRate = await BaseRate.findOne({ isActive: true }).lean();
+
   await BaseRate.updateMany({ isActive: true }, { isActive: false });
-  const rateData = { wrBaseRate, isActive: true, updatedBy: employeeId };
+
+  // Always carry forward hbGaugePremiums — merge: hardcoded defaults ← old DB values ← admin overrides
+  const prevGaugePremiums = prevRate?.hbGaugePremiums || {};
+  const mergedGaugePremiums = {
+    ...DEFAULT_HB_GAUGE_PREMIUMS,
+    ...prevGaugePremiums,
+    ...(overrides.hbGaugePremiums || {}),
+  };
+
+  const rateData = {
+    wrBaseRate,
+    isActive: true,
+    updatedBy: employeeId,
+    hbGaugePremiums: mergedGaugePremiums,
+    sizePremiums: overrides.sizePremiums || prevRate?.sizePremiums || undefined,
+    carbonExtras: overrides.carbonExtras || prevRate?.carbonExtras || undefined,
+  };
   if (overrides.hbPremium !== undefined) rateData.hbPremium = overrides.hbPremium;
   if (overrides.fixedCharge !== undefined) rateData.fixedCharge = overrides.fixedCharge;
   if (overrides.gstPercent !== undefined) rateData.gstPercent = overrides.gstPercent;
-  if (overrides.sizePremiums) rateData.sizePremiums = overrides.sizePremiums;
-  if (overrides.carbonExtras) rateData.carbonExtras = overrides.carbonExtras;
-  if (overrides.hbGaugePremiums) rateData.hbGaugePremiums = overrides.hbGaugePremiums;
+
   const newRate = await BaseRate.create(rateData);
   logger.info(`Base rate updated to ₹${wrBaseRate} by employee ${employeeId}`);
   return newRate;
@@ -231,6 +272,7 @@ const clearRateCache = () => {
 module.exports = {
   GAUGE_MM_TABLE,
   ALL_HB_GAUGES,
+  DEFAULT_HB_GAUGE_PREMIUMS,
   mmToGauge,
   gaugeToMmRange,
   getActiveBaseRate,
