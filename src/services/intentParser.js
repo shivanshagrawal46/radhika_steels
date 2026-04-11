@@ -205,12 +205,14 @@ function parse(text) {
     }
   }
 
-  // 6. Detect single mm/dia: "5.3mm", "5.3 dia" — routes to HB if in HB range and not a WR size
+  // 6. Detect single mm/dia: "5.3mm", "5.3 dia" — routes to HB if in HB range
+  // Skip values that look like WR sizes (whole numbers or 5.5 in the 3-30 range)
   if (!result.mm && !result.gauge) {
     const mmSingle = MM_SINGLE_REGEX.exec(lower);
     if (mmSingle) {
       const mmVal = parseFloat(mmSingle[1]);
-      if (isHBMmRange(mmVal) && !AVAILABLE_WR_SIZES.includes(mmSingle[1])) {
+      const looksLikeWR = isWRSize(mmVal) && (Number.isInteger(mmVal) || mmSingle[1] === "5.5");
+      if (isHBMmRange(mmVal) && !AVAILABLE_WR_SIZES.includes(mmSingle[1]) && !looksLikeWR) {
         result.mm = mmSingle[1];
         result.gauge = mmToGauge(mmVal);
         if (!result.category) result.category = "hb";

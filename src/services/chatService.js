@@ -301,29 +301,39 @@ const handleIncomingMessage = async (parsed) => {
     logger.info(`[CHAT] L1b Context enriched (order_confirm): cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge}, qty=${parsedIntent.quantity}`);
   }
 
-  // Multi-message order flow: user provides quantity after being asked "kitna ton?"
-  // e.g., previous: "book kariye" → AI asked for quantity → user: "5 ton kariye"
+  // ─── Multi-message order flow ───
+  // When AI asked "kitna ton chahiye?", the user's next message is the answer.
+  // Override whatever the parser detected — "5" is quantity, NOT WR 5mm.
   const lastWasOrder = conversation.context?.lastIntent === "order_confirm";
   const orderNotYetCreated = conversation.stage !== "order_confirmed";
   const hasProductCtx = conversation.context?.lastDetectedProduct?.category;
 
-  if (parsedIntent.intent === "unknown" && parsedIntent.quantity && lastWasOrder && orderNotYetCreated && hasProductCtx) {
+  if (lastWasOrder && orderNotYetCreated && hasProductCtx) {
     const ctx = conversation.context.lastDetectedProduct;
-    parsedIntent.intent = "order_confirm";
-    parsedIntent.category = ctx.category;
-    parsedIntent.size = ctx.size || null;
-    parsedIntent.gauge = ctx.gauge || null;
-    parsedIntent.mm = ctx.mm || null;
-    parsedIntent.carbonType = ctx.carbonType || "normal";
-    parsedIntent.unit = parsedIntent.unit || "ton";
-    parsedIntent.confidence = 0.7;
-    logger.info(`[CHAT] L1c Quantity continuation: cat=${parsedIntent.category}, qty=${parsedIntent.quantity}`);
-  }
+    const trimmed = (text || "").trim();
 
-  // Multi-message order flow: user confirms with "ji", "haan", "ok" after order context
-  if (parsedIntent.intent === "follow_up" && lastWasOrder && orderNotYetCreated && hasProductCtx) {
-    const ctx = conversation.context.lastDetectedProduct;
-    if (ctx.quantity && ctx.quantity > 0) {
+    // Case 1: User sends quantity — "5", "5 ton", "5 ton kariye", "10 mt karo"
+    const qtyMatch = trimmed.match(/^(\d+(?:\.\d+)?)\s*(?:ton|tons|mt|mts|tonne|tonnes|metric\s*ton)?\s*(?:kariye|karo|kar\s*do|kijiye|please|chahiye|de\s*do|bhejo|book)?[.!?]*$/i);
+    if (qtyMatch) {
+      const qty = parseFloat(qtyMatch[1]);
+      if (qty > 0 && qty <= 1000) {
+        parsedIntent.intent = "order_confirm";
+        parsedIntent.category = ctx.category;
+        parsedIntent.size = ctx.size || null;
+        parsedIntent.gauge = ctx.gauge || null;
+        parsedIntent.mm = ctx.mm || null;
+        parsedIntent.carbonType = ctx.carbonType || "normal";
+        parsedIntent.quantity = qty;
+        parsedIntent.unit = "ton";
+        parsedIntent.sizeAvailable = true;
+        parsedIntent.closestSizes = [];
+        parsedIntent.confidence = 0.7;
+        logger.info(`[CHAT] L1c Order quantity: cat=${ctx.category}, qty=${qty}`);
+      }
+    }
+
+    // Case 2: User confirms — "ji", "haan", "ok" — use previously discussed quantity
+    if (parsedIntent.intent === "follow_up" && ctx.quantity && ctx.quantity > 0) {
       parsedIntent.intent = "order_confirm";
       parsedIntent.category = ctx.category;
       parsedIntent.size = ctx.size || null;
@@ -333,7 +343,7 @@ const handleIncomingMessage = async (parsed) => {
       parsedIntent.quantity = ctx.quantity;
       parsedIntent.unit = ctx.unit || "ton";
       parsedIntent.confidence = 0.7;
-      logger.info(`[CHAT] L1c Confirmation follow-up: cat=${parsedIntent.category}, qty=${parsedIntent.quantity}`);
+      logger.info(`[CHAT] L1c Order confirmation: cat=${ctx.category}, qty=${ctx.quantity}`);
     }
   }
 
