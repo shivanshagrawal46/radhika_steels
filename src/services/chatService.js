@@ -567,7 +567,7 @@ const handleIncomingMessage = async (parsed) => {
   }
 
   // ─── LAYER 2: Parser confident (>= 0.9) → template directly ───
-  if (parsedIntent.confidence >= 0.9) {
+  if (!responseText && parsedIntent.confidence >= 0.9) {
     if (parsedIntent.intent === "price_inquiry" && parsedIntent.category === "wr" && !parsedIntent.size) {
       parsedIntent.size = "5.5";
       parsedIntent.sizeAvailable = true;
