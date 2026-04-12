@@ -74,6 +74,11 @@ const conversationSchema = new mongoose.Schema(
       },
     },
 
+    // ── AI needs employee attention ──
+    needsAttention: { type: Boolean, default: false },
+    needsAttentionAt: { type: Date, default: null },
+    needsAttentionReason: { type: String, default: "" },
+
     // ── Unread tracking ──
     unreadCount: {
       type: Number,
@@ -109,6 +114,7 @@ conversationSchema.index({ stage: 1, lastMessageAt: -1 });
 conversationSchema.index({ assignedTo: 1, status: 1 });
 conversationSchema.index({ user: 1, status: 1 });
 conversationSchema.index({ unreadCount: -1, lastMessageAt: -1 });
+conversationSchema.index({ needsAttention: 1, needsAttentionAt: -1 });
 
 conversationSchema.virtual("messages", {
   ref: "Message",

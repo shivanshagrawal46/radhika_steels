@@ -75,6 +75,9 @@ module.exports = (io, socket) => {
                 handlerType: "$handlerType",
                 employeeTakenAt: "$employeeTakenAt",
                 assignedTo: "$assignedTo",
+                needsAttention: "$needsAttention",
+                needsAttentionAt: "$needsAttentionAt",
+                needsAttentionReason: "$needsAttentionReason",
               },
             },
           },
@@ -91,6 +94,40 @@ module.exports = (io, socket) => {
       callback({ success: true, data: populated });
     } catch (err) {
       logger.error("chat:pipeline error:", err.message);
+      callback({ success: false, error: err.message });
+    }
+  });
+
+  // ── chat:needs_attention_list — conversations where AI went silent ──
+  socket.on("chat:needs_attention_list", async (_payload, callback) => {
+    try {
+      const conversations = await Conversation.find({ needsAttention: true, status: "active" })
+        .sort({ needsAttentionAt: -1 })
+        .populate("user", "name phone company city waId partyName firmName billName gstNo contactName")
+        .populate("assignedTo", "name")
+        .lean();
+
+      const phones = conversations.map((c) => c.user?.phone || c.user?.waId).filter(Boolean);
+      const contacts = await Contact.find({ phone: { $in: phones } }).lean();
+      const contactMap = {};
+      for (const c of contacts) {
+        if (!contactMap[c.phone]) contactMap[c.phone] = [];
+        contactMap[c.phone].push(c);
+      }
+
+      const enriched = conversations.map((c) => {
+        const phone = c.user?.phone || c.user?.waId || "";
+        const imported = contactMap[phone] || [];
+        const displayName =
+          c.user?.partyName || c.user?.firmName ||
+          (imported.length > 0 ? imported[0].contactName : "") ||
+          c.user?.contactName || c.user?.name || phone;
+        return { ...c, displayName, importedContacts: imported };
+      });
+
+      callback({ success: true, data: enriched, total: enriched.length });
+    } catch (err) {
+      logger.error("chat:needs_attention_list error:", err.message);
       callback({ success: false, error: err.message });
     }
   });

@@ -12,18 +12,21 @@ const seed = async () => {
   console.log("Connected to MongoDB for seeding");
 
   // 1. Create admin employee
+  const ADMIN_PASSWORD = "Radhika@21092004";
   const existingAdmin = await Employee.findOne({ email: "admin@radhikasteels.com" });
   if (!existingAdmin) {
     await Employee.create({
       name: "Admin",
       email: "admin@radhikasteels.com",
-      password: "Admin@1234",
+      password: ADMIN_PASSWORD,
       phone: "",
       role: "admin",
     });
-    console.log("✓ Admin employee created (admin@radhikasteels.com / Admin@1234)");
+    console.log("✓ Admin employee created (admin@radhikasteels.com)");
   } else {
-    console.log("✓ Admin employee already exists");
+    existingAdmin.password = ADMIN_PASSWORD;
+    await existingAdmin.save();
+    console.log("✓ Admin password updated");
   }
 
   // 2. Create or patch base rate with complete HB gauge premiums

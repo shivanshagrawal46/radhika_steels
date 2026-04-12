@@ -322,8 +322,28 @@ function intentToStage(intent) {
   return map[intent] || null;
 }
 
+/**
+ * Parse a message that may contain multiple product inquiries (one per line).
+ * Returns an array of parsed items (length >= 2) or empty array.
+ */
+function parseMultiple(text) {
+  if (!text || typeof text !== "string") return [];
+  const lines = text.split(/[\n\r]+/).map((l) => l.trim()).filter((l) => l.length > 0);
+  if (lines.length < 2) return [];
+
+  const items = [];
+  for (const line of lines) {
+    const parsed = parse(line);
+    if (parsed.category && (parsed.size || parsed.gauge || parsed.mm)) {
+      items.push(parsed);
+    }
+  }
+  return items.length >= 2 ? items : [];
+}
+
 module.exports = {
   parse,
+  parseMultiple,
   intentToStage,
   findClosestWRSizes,
   mmToGauge,

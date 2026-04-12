@@ -95,6 +95,14 @@ ORDER CONFIRMATION examples (intent=order_confirm):
 - "kitna book karna hoga" → order_inquiry (asking about process)
 - "book kariye" without prior product+qty context → order_inquiry
 
+⚠️ COMPLAINTS / QUESTIONS about previous AI responses are NEVER order_confirm:
+- "I have given u three prices for this?" → unknown, needs_admin=true (complaint)
+- "maine teen sizes diye the" → unknown, needs_admin=true (complaint about missing prices)
+- "baaki ka rate kyu nahi diya" → unknown, needs_admin=true (complaint)
+- "teeno ka rate do" → price_inquiry (re-asking for prices)
+- "aur sizes ka bhi batao" → follow_up (asking for more prices)
+- Any message ending with "?" that doesn't contain order keywords → NOT order_confirm
+
 OTHER:
 - "gadi nikli kya" / "maal kab aayega" → delivery_inquiry
 - "thoda kam karo" / "discount" → negotiation
@@ -338,6 +346,13 @@ Look at the conversation history and determine:
 1. Is the customer genuinely confirming/placing an order? (not just asking prices)
 2. What items do they want to order? Extract ALL items with quantities.
 
+⚠️ STRICT: is_order=false if the customer is:
+- Complaining ("I asked three sizes", "maine teen sizes diye the", "baaki ka?")
+- Asking a question ("why only one rate?", "kyu ek hi rate diya?")
+- Expressing confusion or frustration about the AI response
+- Any message that is a QUESTION (ends with ?) without explicit order words (book/confirm/pakka/le lo)
+When in doubt, is_order=false. Wrong orders are MUCH worse than missed orders.
+
 PRODUCTS:
 - WR (Wire Rod): sizes 5.5mm, 7mm, 8mm, 10mm, 12mm, 14mm, 16mm, 18mm. Carbon: normal or lc (low carbon).
 - HB Wire: gauges 1g-14g, 1/0-6/0. Specified in mm ranges like "5.3 se 5.4mm".
@@ -454,4 +469,67 @@ const verifyOrder = async (recentMessages) => {
   }
 };
 
-module.exports = { classifyIntent, generateResponse, verifyOrder };
+/**
+ * Extract billing details (firm name, GST number) from user's message.
+ */
+const BILLING_EXTRACT_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "extract_billing",
+      description: "Extract firm name and GST number from the customer's message",
+      parameters: {
+        type: "object",
+        properties: {
+          firm_name: { type: "string", description: "Firm or company name. Empty if not found." },
+          gst_no: { type: "string", description: "GST number (15-char alphanumeric). Empty if not found." },
+          bill_name: { type: "string", description: "Billing name if different from firm name. Empty if not found." },
+          has_details: { type: "boolean", description: "true if at least firm name OR GST was found" },
+        },
+        required: ["firm_name", "gst_no", "has_details"],
+      },
+    },
+  },
+];
+
+const extractBillingDetails = async (userMessage) => {
+  const start = Date.now();
+  try {
+    const response = await getClient().chat.completions.create({
+      model: env.OPENAI_MODEL,
+      messages: [
+        {
+          role: "system",
+          content: `Extract the firm name and GST number from the customer's message. The customer is a steel buyer in India.
+GST numbers are 15 characters: 2 digits (state) + 10 chars (PAN) + 1 digit + 1 letter + 1 checksum.
+Example: "27AABCU9603R1ZM"
+The customer may send them in one message or separately. Extract whatever is available.
+If the message doesn't contain billing info (e.g. it's a question or unrelated), set has_details=false.`,
+        },
+        { role: "user", content: userMessage },
+      ],
+      tools: BILLING_EXTRACT_TOOLS,
+      tool_choice: { type: "function", function: { name: "extract_billing" } },
+      temperature: 0.1,
+      max_tokens: 256,
+    });
+
+    const tc = response.choices[0]?.message?.tool_calls?.[0];
+    let result = null;
+    if (tc?.function?.arguments) {
+      try { result = JSON.parse(tc.function.arguments); } catch { /* parse error */ }
+    }
+    const usage = response.usage || {};
+    logger.info(`[OPENAI] Billing extracted in ${Date.now() - start}ms, tokens=${usage.total_tokens || 0}, has=${result?.has_details}`);
+    return {
+      result,
+      usage: { totalTokens: usage.total_tokens || 0 },
+      responseTimeMs: Date.now() - start,
+    };
+  } catch (err) {
+    logger.error(`[OPENAI] extractBillingDetails FAILED: ${err.message}`);
+    throw err;
+  }
+};
+
+module.exports = { classifyIntent, generateResponse, verifyOrder, extractBillingDetails };

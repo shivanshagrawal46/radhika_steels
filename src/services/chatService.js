@@ -139,10 +139,21 @@ async function processOrderConfirmation(orderResult, conversation, user, io, fro
     logger.info(`[ORDER] ${order.orderNumber} created, total=₹${grandTotal}`);
 
     // Only build confirmation text AFTER successful DB save
-    return await responseBuilder.buildOrderConfirmation(items);
+    let confirmText = await responseBuilder.buildOrderConfirmation(items);
+
+    // If user doesn't have billing details yet, ask for them
+    const hasBilling = user.firmName || user.gstNo;
+    if (!hasBilling) {
+      confirmText += `\n\nBilling ke liye *firm name* aur *GST number* bata dijiye.`;
+      conversation.context.lastIntent = "billing_details";
+      conversation.markModified("context");
+      await conversation.save();
+    }
+
+    return confirmText;
   } catch (err) {
     logger.error(`[ORDER] DB save failed: ${err.message}`);
-    return null; // Don't send confirmation if DB failed
+    return null;
   }
 }
 
@@ -254,6 +265,63 @@ const handleIncomingMessage = async (parsed) => {
   // 6. LAYER 1 — Intent parsing (FREE)
   let parsedIntent = intentParser.parse(text);
   logger.info(`[CHAT] L1 Parser: intent=${parsedIntent.intent}, cat=${parsedIntent.category || "-"}, conf=${parsedIntent.confidence}`);
+
+  // 6b. BILLING DETAILS intercept — if AI asked for firm/GST after order confirmation
+  if (conversation.context?.lastIntent === "billing_details" && text && text.trim().length > 0) {
+    try {
+      const { result: billing } = await openaiService.extractBillingDetails(text);
+      if (billing && billing.has_details && (billing.firm_name || billing.gst_no)) {
+        const updates = {};
+        if (billing.firm_name) updates.firmName = billing.firm_name;
+        if (billing.gst_no) updates.gstNo = billing.gst_no;
+        if (billing.bill_name) updates.billName = billing.bill_name;
+        await updatePartyDetails(user._id, updates);
+
+        conversation.context.lastIntent = "billing_saved";
+        conversation.markModified("context");
+        await conversation.save();
+
+        const confirmMsg = billing.firm_name && billing.gst_no
+          ? `Dhanyawad! Details save ho gayi:\n\nFirm: *${billing.firm_name}*\nGST: *${billing.gst_no}*`
+          : `Details save ho gayi hain. Dhanyawad! 🙏`;
+
+        const billingAiMsg = await Message.create({
+          conversation: conversation._id,
+          sender: { type: "ai" },
+          content: { text: confirmMsg },
+          deliveryStatus: "pending",
+          readByAdmin: true,
+          aiMetadata: { model: "template", intent: "billing_details" },
+        });
+        conversation.messageCount += 1;
+        conversation.lastMessage = { text: confirmMsg.substring(0, 200), senderType: "ai", mediaType: "none", timestamp: new Date() };
+        conversation.lastMessageAt = new Date();
+        conversation.markModified("context");
+        await conversation.save();
+
+        try {
+          const waRes = await whatsappService.sendTextMessage(from, confirmMsg);
+          billingAiMsg.waMessageId = waRes.messages?.[0]?.id || "";
+          billingAiMsg.deliveryStatus = "sent";
+          billingAiMsg.sentAt = new Date();
+          await billingAiMsg.save();
+        } catch (sendErr) {
+          logger.error(`[CHAT] Billing confirm WA send failed: ${sendErr.message}`);
+        }
+
+        io.to(`conv:${conversation._id}`).emit("chat:new_message", { conversationId: conversation._id.toString(), message: billingAiMsg.toObject() });
+        io.to("employees").emit("chat:party_updated", { userId: user._id.toString(), updates });
+
+        logger.info(`[CHAT] Billing details saved for user ${from}: firm=${billing.firm_name}, gst=${billing.gst_no}`);
+        logger.info(`[CHAT] ─── END from=${from} — BILLING SAVED ───`);
+        return;
+      }
+    } catch (err) {
+      logger.warn(`[CHAT] Billing extraction failed: ${err.message}`);
+    }
+    conversation.context.lastIntent = "";
+    conversation.markModified("context");
+  }
 
   // 7. LAYER 1b — Reply-to context enrichment
   if (replyToContext) {
@@ -463,6 +531,41 @@ const handleIncomingMessage = async (parsed) => {
   let aiUsage = { totalTokens: 0 };
   let responseTimeMs = 0;
 
+  // ─── MULTI-ITEM: multiple sizes in one message → multi-price response ───
+  const multiItems = intentParser.parseMultiple(text);
+  if (multiItems.length >= 2) {
+    logger.info(`[CHAT] Multi-item detected: ${multiItems.length} items`);
+    const prices = [];
+    const quantities = [];
+    for (const item of multiItems) {
+      try {
+        let price;
+        if (item.category === "wr") {
+          price = await pricingService.calculatePrice("wr", { size: item.size || "5.5", carbonType: item.carbonType });
+        } else if (item.category === "hb") {
+          price = item.mm
+            ? await pricingService.calculatePrice("hb", { mm: item.mm })
+            : await pricingService.calculatePrice("hb", { gauge: item.gauge || "12" });
+        }
+        if (price) {
+          prices.push(price);
+          quantities.push(item.quantity || 0);
+        }
+      } catch (err) {
+        logger.warn(`[CHAT] Multi-item price calc failed: ${err.message}`);
+      }
+    }
+    if (prices.length >= 2) {
+      responseText = responseBuilder.buildMultiPriceResponse(prices, quantities);
+      parsedIntent.intent = "price_inquiry";
+      conversation.context.lastMultiItems = multiItems.map((i) => ({
+        category: i.category, size: i.size || "", gauge: i.gauge || "",
+        mm: i.mm || "", carbonType: i.carbonType || "normal", quantity: i.quantity || 0,
+      }));
+      conversation.markModified("context");
+    }
+  }
+
   // ─── LAYER 2: Parser confident (>= 0.9) → template directly ───
   if (parsedIntent.confidence >= 0.9) {
     if (parsedIntent.intent === "price_inquiry" && parsedIntent.category === "wr" && !parsedIntent.size) {
@@ -604,7 +707,14 @@ const handleIncomingMessage = async (parsed) => {
             finalIntent.gauge = "12";
           }
 
-          // GPT detected order_confirm
+          // GPT detected order_confirm — but guard against misclassified questions/complaints
+          const trimmedLower = (text || "").trim().toLowerCase();
+          const looksLikeQuestion = trimmedLower.endsWith("?") && !/\b(book|confirm|pakka|le\s*lo|lelo|order)\b/i.test(trimmedLower);
+          if (classified.intent === "order_confirm" && looksLikeQuestion) {
+            logger.info(`[CHAT] Blocked false order_confirm — message is a question: "${(text || "").substring(0, 60)}"`);
+            classified.intent = "unknown";
+            classified.needs_admin = true;
+          }
           if (classified.intent === "order_confirm") {
             let gptOrderHistory = chatHistory;
             if (replyToContext && replyToContext.text) {
@@ -653,6 +763,11 @@ const handleIncomingMessage = async (parsed) => {
           // If GPT says needs_admin → DON'T reply, just notify dashboard
           if (!responseText && classified.needs_admin) {
             logger.info(`[CHAT] AI can't answer — staying silent, notifying dashboard`);
+            conversation.needsAttention = true;
+            conversation.needsAttentionAt = new Date();
+            conversation.needsAttentionReason = `AI unsure: ${classified.intent || "unknown"} — "${(text || "").substring(0, 80)}"`;
+            conversation.markModified("context");
+            await conversation.save();
             io.to("employees").emit("chat:needs_attention", {
               conversationId: conversation._id.toString(),
               userId: user._id.toString(),
@@ -661,6 +776,7 @@ const handleIncomingMessage = async (parsed) => {
               lastMessage: text,
               intent: classified.intent,
               emotion: classified.emotion,
+              reason: conversation.needsAttentionReason,
             });
             logger.info(`[CHAT] ─── END from=${from} — SILENT (needs employee) ───`);
             return;
@@ -678,14 +794,19 @@ const handleIncomingMessage = async (parsed) => {
           responseTimeMs += r2;
           usedGPT = true;
         } else {
-          // GPT couldn't generate safe response — stay silent, notify dashboard
           logger.info(`[CHAT] AI has no safe response — staying silent, notifying dashboard`);
+          conversation.needsAttention = true;
+          conversation.needsAttentionAt = new Date();
+          conversation.needsAttentionReason = `No safe response for: "${(text || "").substring(0, 80)}"`;
+          conversation.markModified("context");
+          await conversation.save();
           io.to("employees").emit("chat:needs_attention", {
             conversationId: conversation._id.toString(),
             userId: user._id.toString(),
             userName: displayName || user.name || from,
             phone: from,
             lastMessage: text,
+            reason: conversation.needsAttentionReason,
           });
           logger.info(`[CHAT] ─── END from=${from} — SILENT ───`);
           return;
@@ -698,8 +819,12 @@ const handleIncomingMessage = async (parsed) => {
       if (fallback && fallback.text) {
         responseText = fallback.text;
       } else {
-        // Can't answer — stay silent, notify dashboard
         logger.info(`[CHAT] GPT failed, no fallback — staying silent`);
+        conversation.needsAttention = true;
+        conversation.needsAttentionAt = new Date();
+        conversation.needsAttentionReason = `GPT error: ${err.message.substring(0, 80)}`;
+        conversation.markModified("context");
+        await conversation.save();
         io.to("employees").emit("chat:needs_attention", {
           conversationId: conversation._id.toString(),
           userId: user._id.toString(),
@@ -707,6 +832,7 @@ const handleIncomingMessage = async (parsed) => {
           phone: from,
           lastMessage: text,
           error: err.message,
+          reason: conversation.needsAttentionReason,
         });
         logger.info(`[CHAT] ─── END from=${from} — SILENT (GPT error) ───`);
         return;
@@ -810,6 +936,9 @@ const sendEmployeeMessage = async ({ conversationId, employeeId, text, replyTo, 
   } else {
     conversation.employeeTakenAt = new Date();
   }
+  conversation.needsAttention = false;
+  conversation.needsAttentionAt = null;
+  conversation.needsAttentionReason = "";
   conversation.messageCount += 1;
   conversation.lastMessage = {
     text: text || `[${mediaFields.mediaType || "text"}]`,
@@ -851,6 +980,7 @@ const sendEmployeeMessage = async ({ conversationId, employeeId, text, replyTo, 
     lastMessageAt: conversation.lastMessageAt,
     handlerType: conversation.handlerType,
     stage: conversation.stage,
+    needsAttention: false,
   });
 
   return populated;
@@ -941,6 +1071,8 @@ function emitToDashboard(io, conversation, incomingMsg, isNewConversation, parse
         stage: conversation.stage,
         handlerType: conversation.handlerType,
         context: conversation.context,
+        needsAttention: conversation.needsAttention || false,
+        needsAttentionReason: conversation.needsAttentionReason || "",
       });
     })
     .catch((err) => logger.error(`[CHAT] Dashboard emit failed: ${err.message}`));
@@ -1016,6 +1148,9 @@ const takeOverChat = async (conversationId, employeeId) => {
   conversation.handlerType = "employee";
   conversation.assignedTo = employeeId;
   conversation.employeeTakenAt = new Date();
+  conversation.needsAttention = false;
+  conversation.needsAttentionAt = null;
+  conversation.needsAttentionReason = "";
   await conversation.save();
 
   io.to("employees").emit("chat:conversation_updated", {
@@ -1023,6 +1158,7 @@ const takeOverChat = async (conversationId, employeeId) => {
     handlerType: "employee",
     assignedTo: employeeId,
     employeeTakenAt: conversation.employeeTakenAt,
+    needsAttention: false,
   });
   io.to(`conv:${conversationId}`).emit("chat:handler_changed", {
     conversationId: conversationId.toString(),
