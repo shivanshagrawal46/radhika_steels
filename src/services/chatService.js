@@ -326,16 +326,28 @@ const handleIncomingMessage = async (parsed) => {
   // 7. LAYER 1b — Reply-to context enrichment
   if (replyToContext) {
     const oldParsed = intentParser.parse(replyToContext.text);
+    const replyMultiItems = intentParser.parseMultiple(replyToContext.text);
 
-    if (parsedIntent.intent === "follow_up" && oldParsed.category) {
+    // Multi-item reply-to: user replies "rate" / "today rate" / "?" to a multi-item message
+    if (replyMultiItems.length >= 2 && !parsedIntent.category &&
+        (parsedIntent.intent === "follow_up" || parsedIntent.intent === "price_inquiry" || parsedIntent.intent === "unknown")) {
+      parsedIntent._replyMultiItems = replyMultiItems;
+      parsedIntent.intent = "price_inquiry";
+      parsedIntent.confidence = 0.95;
+      logger.info(`[CHAT] L1b Reply-to multi-item: ${replyMultiItems.length} items from replied message`);
+    }
+    // Single-item: follow_up or price_inquiry replying to a product message
+    else if (!parsedIntent.category && oldParsed.category &&
+             (parsedIntent.intent === "follow_up" || parsedIntent.intent === "price_inquiry" || parsedIntent.intent === "unknown")) {
       parsedIntent.category = oldParsed.category;
       parsedIntent.size = oldParsed.size;
       parsedIntent.gauge = oldParsed.gauge;
       parsedIntent.mm = oldParsed.mm;
       parsedIntent.carbonType = oldParsed.carbonType;
+      parsedIntent.quantity = oldParsed.quantity || parsedIntent.quantity;
       parsedIntent.intent = "price_inquiry";
-      parsedIntent.confidence = 0.9;
-      logger.info(`[CHAT] L1b Reply-to enriched (follow_up): cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge}`);
+      parsedIntent.confidence = 0.95;
+      logger.info(`[CHAT] L1b Reply-to enriched: cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge}`);
     }
 
     // If user replies to an old message with "book karo" / "confirm karo",
@@ -531,8 +543,8 @@ const handleIncomingMessage = async (parsed) => {
   let aiUsage = { totalTokens: 0 };
   let responseTimeMs = 0;
 
-  // ─── MULTI-ITEM: multiple sizes in one message → multi-price response ───
-  const multiItems = intentParser.parseMultiple(text);
+  // ─── MULTI-ITEM: multiple sizes in one message (or from replied-to message) ───
+  const multiItems = parsedIntent._replyMultiItems || intentParser.parseMultiple(text);
   if (multiItems.length >= 2) {
     logger.info(`[CHAT] Multi-item detected: ${multiItems.length} items`);
     const prices = [];
