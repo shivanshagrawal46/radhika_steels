@@ -116,25 +116,24 @@ const shortLabel = (label) => label.replace(/\s*\([\d.]+-[\d.]+mm\)/, "");
 // Multi-product response
 // ──────────────────────────────────────────────
 const buildMultiPriceResponse = (prices, quantities) => {
-  let msg = `${BRAND}\n`;
+  let msg = `${BRAND}`;
   let grandTotal = 0;
 
   for (let i = 0; i < prices.length; i++) {
     const p = prices[i];
     const qty = quantities[i] || 0;
-    msg += `\n▸ *${shortLabel(p.label)}*`;
-    msg += `\n   ${INR(p.mergedBase)} + ${INR(p.fixedCharge)} + ${p.gstPercent}% GST`;
-    msg += `\n   *${INR(p.total)}/ton*`;
+    msg += `\n\n▸ *${shortLabel(p.label)}*`;
+    msg += `\n${INR(p.mergedBase)} + ${INR(p.fixedCharge)} + ${p.gstPercent}% GST = *${INR(p.total)}/ton*`;
     if (qty > 0) {
       const itemTotal = Math.round(p.total * qty);
       grandTotal += itemTotal;
-      msg += `\n   ${qty} ton × ${INR(p.total)} = *${INR(itemTotal)}*`;
+      msg += `\n${qty} ton × ${INR(p.total)} = *${INR(itemTotal)}*`;
     }
-    msg += ``;
   }
 
   if (grandTotal > 0) {
-    msg += `\n\n*Total: ${INR(grandTotal)}*`;
+    msg += `\n\n─────────────────`;
+    msg += `\n*Total: ${INR(grandTotal)}*`;
   }
 
   msg += `\n\n_Rate per ton (1000 kg) incl. GST_`;
@@ -150,7 +149,7 @@ const ADVANCE_AMOUNT = 50000;
 
 const buildOrderConfirmation = async (items) => {
   let msg = `${BRAND}\n`;
-  msg += `✅ *Order Confirmed*\n`;
+  msg += `✅ *Order Confirmed*`;
 
   let grandTotal = 0;
   let totalQty = 0;
@@ -182,20 +181,20 @@ const buildOrderConfirmation = async (items) => {
     grandTotal += itemTotal;
     totalQty += qty;
 
-    msg += `\n▸ *${shortLabel(price.label)}*`;
-    msg += `\n   ${INR(price.mergedBase)} + ${INR(price.fixedCharge)} + ${price.gstPercent}% GST`;
-    msg += `\n   *${INR(price.total)}/ton*`;
+    msg += `\n\n▸ *${shortLabel(price.label)}*`;
+    msg += `\n${INR(price.mergedBase)} + ${INR(price.fixedCharge)} + ${price.gstPercent}% GST = *${INR(price.total)}/ton*`;
     if (qty > 0) {
-      msg += `\n   ${qty} ton × ${INR(price.total)} = *${INR(itemTotal)}*`;
+      msg += `\n${qty} ton × ${INR(price.total)} = *${INR(itemTotal)}*`;
     }
   }
 
-  msg += `\n\n*Total: ${totalQty} ton — ${INR(grandTotal)}*`;
+  msg += `\n\n─────────────────`;
+  msg += `\n*Total: ${totalQty} ton — ${INR(grandTotal)}*`;
 
   msg += `\n\n*Payment:*`;
-  msg += `\n▸ Advance: *${INR(ADVANCE_AMOUNT)}* (booking ke liye)`;
-  msg += `\n▸ Balance: *${INR(Math.max(0, grandTotal - ADVANCE_AMOUNT))}* (loading pe)`;
-  msg += `\n▸ Transport: Aapki taraf se`;
+  msg += `\nAdvance: *${INR(ADVANCE_AMOUNT)}* (booking ke liye)`;
+  msg += `\nBalance: *${INR(Math.max(0, grandTotal - ADVANCE_AMOUNT))}* (loading pe)`;
+  msg += `\nTransport: Aapki taraf se`;
 
   msg += `\n\n✅ Advance milte hi dispatch schedule hoga.`;
   msg += `\n🙏 Dhanyawad!`;
