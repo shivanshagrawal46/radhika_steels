@@ -598,8 +598,12 @@ const handleIncomingMessage = async (parsed) => {
     }
   }
 
-  // ─── LAYER 2b: Delivery inquiry — check DB for delivery info ───
-  if (!responseText && (parsedIntent.intent === "delivery_inquiry" || text.match(/\b(gadi|gaadi|maal|truck|dispatch|deliver|loading)\b/i))) {
+  // ─── LAYER 2b: Delivery inquiry — ONLY from DB, NEVER GPT ───
+  // If delivery keywords detected → check DB. Details found → respond. Not found → SILENT.
+  // GPT must NEVER generate delivery responses (hallucination risk).
+  const deliveryKeyword = !responseText && (parsedIntent.intent === "delivery_inquiry" || (text || "").match(/\b(gadi|gaadi|maal|truck|dispatch|deliver|delivery|loading|nikli|nikali|kab\s*aa|pahunch)\b/i));
+  if (deliveryKeyword) {
+    let deliveryHandled = false;
     try {
       const activeOrders = await Order.find({ user: user._id, status: { $nin: ["delivered", "cancelled"] }, closedAt: null })
         .sort({ createdAt: -1 }).limit(1).lean();
@@ -609,11 +613,31 @@ const handleIncomingMessage = async (parsed) => {
         if (d.scheduledDate || d.dispatchedAt || d.driverName || d.vehicleNumber) {
           responseText = responseBuilder.buildDeliveryResponse(o);
           usedGPT = false;
+          deliveryHandled = true;
           logger.info(`[CHAT] L2b Delivery info from DB for order ${o.orderNumber}`);
         }
       }
     } catch (err) {
       logger.warn(`[CHAT] L2b Delivery check failed: ${err.message}`);
+    }
+
+    if (!deliveryHandled) {
+      logger.info(`[CHAT] L2b Delivery inquiry — no delivery details in DB → SILENT`);
+      conversation.needsAttention = true;
+      conversation.needsAttentionAt = new Date();
+      conversation.needsAttentionReason = `Delivery inquiry — no details in DB`;
+      conversation.markModified("context");
+      await conversation.save();
+      io.to("employees").emit("chat:needs_attention", {
+        conversationId: conversation._id.toString(),
+        userId: user._id.toString(),
+        userName: displayName || user.name || from,
+        phone: from,
+        lastMessage: text,
+        reason: conversation.needsAttentionReason,
+      });
+      logger.info(`[CHAT] ─── END from=${from} — SILENT (delivery, no DB data) ───`);
+      return;
     }
   }
 
@@ -762,6 +786,45 @@ const handleIncomingMessage = async (parsed) => {
             }
           }
 
+          // GPT detected delivery_inquiry → DB-only, never GPT response
+          if (!responseText && classified.intent === "delivery_inquiry") {
+            let foundDelivery = false;
+            try {
+              const delOrders = await Order.find({ user: user._id, status: { $nin: ["delivered", "cancelled"] }, closedAt: null })
+                .sort({ createdAt: -1 }).limit(1).lean();
+              if (delOrders.length > 0) {
+                const od = delOrders[0];
+                const dd = od.delivery || {};
+                if (dd.scheduledDate || dd.dispatchedAt || dd.driverName || dd.vehicleNumber) {
+                  responseText = responseBuilder.buildDeliveryResponse(od);
+                  usedGPT = true;
+                  foundDelivery = true;
+                  logger.info(`[CHAT] L3 Delivery from DB for order ${od.orderNumber}`);
+                }
+              }
+            } catch (err) {
+              logger.warn(`[CHAT] L3 Delivery DB check failed: ${err.message}`);
+            }
+            if (!foundDelivery) {
+              logger.info(`[CHAT] L3 GPT classified delivery_inquiry — no DB data → SILENT`);
+              conversation.needsAttention = true;
+              conversation.needsAttentionAt = new Date();
+              conversation.needsAttentionReason = `Delivery inquiry — no details in DB`;
+              conversation.markModified("context");
+              await conversation.save();
+              io.to("employees").emit("chat:needs_attention", {
+                conversationId: conversation._id.toString(),
+                userId: user._id.toString(),
+                userName: displayName || user.name || from,
+                phone: from,
+                lastMessage: text,
+                reason: conversation.needsAttentionReason,
+              });
+              logger.info(`[CHAT] ─── END from=${from} — SILENT (delivery, no DB data) ───`);
+              return;
+            }
+          }
+
           // Try template for the classified intent
           if (!responseText) {
             parsedIntent = finalIntent;
@@ -796,33 +859,24 @@ const handleIncomingMessage = async (parsed) => {
         }
       }
 
-      // If still no response — try conversational reply (only for safe topics)
+      // No template matched — stay SILENT, notify admin
       if (!responseText) {
-        logger.info(`[CHAT] L3b Conversational response...`);
-        const { reply, usage: u2, responseTimeMs: r2 } = await openaiService.generateResponse(chatHistory, dbContext);
-        if (reply && reply.trim()) {
-          responseText = reply;
-          aiUsage.totalTokens += u2.totalTokens;
-          responseTimeMs += r2;
-          usedGPT = true;
-        } else {
-          logger.info(`[CHAT] AI has no safe response — staying silent, notifying dashboard`);
-          conversation.needsAttention = true;
-          conversation.needsAttentionAt = new Date();
-          conversation.needsAttentionReason = `No safe response for: "${(text || "").substring(0, 80)}"`;
-          conversation.markModified("context");
-          await conversation.save();
-          io.to("employees").emit("chat:needs_attention", {
-            conversationId: conversation._id.toString(),
-            userId: user._id.toString(),
-            userName: displayName || user.name || from,
-            phone: from,
-            lastMessage: text,
-            reason: conversation.needsAttentionReason,
-          });
-          logger.info(`[CHAT] ─── END from=${from} — SILENT ───`);
-          return;
-        }
+        logger.info(`[CHAT] No template matched — staying SILENT, notifying dashboard`);
+        conversation.needsAttention = true;
+        conversation.needsAttentionAt = new Date();
+        conversation.needsAttentionReason = `No template for: "${(text || "").substring(0, 80)}"`;
+        conversation.markModified("context");
+        await conversation.save();
+        io.to("employees").emit("chat:needs_attention", {
+          conversationId: conversation._id.toString(),
+          userId: user._id.toString(),
+          userName: displayName || user.name || from,
+          phone: from,
+          lastMessage: text,
+          reason: conversation.needsAttentionReason,
+        });
+        logger.info(`[CHAT] ─── END from=${from} — SILENT (no template) ───`);
+        return;
       }
     } catch (err) {
       logger.error(`[CHAT] L3 GPT failed: ${err.message}`);

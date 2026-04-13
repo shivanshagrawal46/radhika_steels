@@ -108,6 +108,11 @@ const buildUnavailableSizeResponse = async (size, carbonType, quantity) => {
 };
 
 // ──────────────────────────────────────────────
+// Strip mm range from HB label: "HB Wire 5g (5.2-5.6mm)" → "HB Wire 5g"
+// ──────────────────────────────────────────────
+const shortLabel = (label) => label.replace(/\s*\([\d.]+-[\d.]+mm\)/, "");
+
+// ──────────────────────────────────────────────
 // Multi-product response
 // ──────────────────────────────────────────────
 const buildMultiPriceResponse = (prices, quantities) => {
@@ -117,12 +122,15 @@ const buildMultiPriceResponse = (prices, quantities) => {
   for (let i = 0; i < prices.length; i++) {
     const p = prices[i];
     const qty = quantities[i] || 0;
-    msg += `\n▸ *${p.label}* — *${INR(p.total)}/ton*`;
+    msg += `\n▸ *${shortLabel(p.label)}*`;
+    msg += `\n   ${INR(p.mergedBase)} + ${INR(p.fixedCharge)} + ${p.gstPercent}% GST`;
+    msg += `\n   *${INR(p.total)}/ton*`;
     if (qty > 0) {
       const itemTotal = Math.round(p.total * qty);
       grandTotal += itemTotal;
-      msg += `\n   ${qty}T × ${INR(p.total)} = *${INR(itemTotal)}*`;
+      msg += `\n   ${qty} ton × ${INR(p.total)} = *${INR(itemTotal)}*`;
     }
+    msg += ``;
   }
 
   if (grandTotal > 0) {
@@ -174,8 +182,12 @@ const buildOrderConfirmation = async (items) => {
     grandTotal += itemTotal;
     totalQty += qty;
 
-    msg += `\n▸ *${price.label}*`;
-    msg += `\n   ${INR(price.total)}/ton × ${qty}T = *${INR(itemTotal)}*`;
+    msg += `\n▸ *${shortLabel(price.label)}*`;
+    msg += `\n   ${INR(price.mergedBase)} + ${INR(price.fixedCharge)} + ${price.gstPercent}% GST`;
+    msg += `\n   *${INR(price.total)}/ton*`;
+    if (qty > 0) {
+      msg += `\n   ${qty} ton × ${INR(price.total)} = *${INR(itemTotal)}*`;
+    }
   }
 
   msg += `\n\n*Total: ${totalQty} ton — ${INR(grandTotal)}*`;
