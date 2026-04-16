@@ -90,7 +90,7 @@ const init = (httpServer) => {
       client.lastActiveAt = new Date();
       await client.save();
 
-      socket.client = client;
+      socket.clientData = client;
       socket.join(`client:${client._id}`);
       next();
     } catch (err) {
@@ -100,23 +100,23 @@ const init = (httpServer) => {
   });
 
   clientNsp.on("connection", (socket) => {
-    logger.info(`Client connected: ${socket.client.phone} (${socket.client.approvalStatus})`);
+    logger.info(`Client connected: ${socket.clientData.phone} (${socket.clientData.approvalStatus})`);
 
     clientHandler(clientNsp, socket);
 
     // Send current status immediately on connect
     socket.emit("approval:status", {
-      approvalStatus: socket.client.approvalStatus,
-      isProfileComplete: socket.client.isProfileComplete,
-      rejectionReason: socket.client.rejectionReason || "",
+      approvalStatus: socket.clientData.approvalStatus,
+      isProfileComplete: socket.clientData.isProfileComplete,
+      rejectionReason: socket.clientData.rejectionReason || "",
     });
 
     socket.on("disconnect", (reason) => {
-      logger.debug(`Client disconnected: ${socket.client.phone} — ${reason}`);
+      logger.debug(`Client disconnected: ${socket.clientData.phone} — ${reason}`);
     });
 
     socket.on("error", (err) => {
-      logger.error(`Client socket error [${socket.client.phone}]:`, err.message);
+      logger.error(`Client socket error [${socket.clientData.phone}]:`, err.message);
     });
   });
 

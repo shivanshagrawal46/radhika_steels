@@ -5,7 +5,7 @@ const logger = require("../config/logger");
 
 /**
  * Events handled on the /client namespace.
- * socket.client is set by the Firebase auth middleware in socket/index.js.
+ * socket.clientData is set by the JWT auth middleware in socket/index.js.
  */
 module.exports = (clientNsp, socket) => {
   // ────────────────────────────────────────────────
@@ -13,7 +13,7 @@ module.exports = (clientNsp, socket) => {
   // ────────────────────────────────────────────────
   socket.on("profile:get", async (_payload, callback) => {
     try {
-      const client = await clientService.getClientById(socket.client._id);
+      const client = await clientService.getClientById(socket.clientData._id);
       callback({ success: true, data: client });
     } catch (err) {
       logger.error("profile:get error:", err.message);
@@ -42,7 +42,7 @@ module.exports = (clientNsp, socket) => {
         });
       }
 
-      const client = await clientService.submitProfile(socket.client._id, {
+      const client = await clientService.submitProfile(socket.clientData._id, {
         name,
         firmName,
         email,
@@ -51,7 +51,7 @@ module.exports = (clientNsp, socket) => {
       });
 
       // Update the socket's cached client reference
-      socket.client = client;
+      socket.clientData = client;
 
       callback({
         success: true,
@@ -75,12 +75,12 @@ module.exports = (clientNsp, socket) => {
   // ────────────────────────────────────────────────
   socket.on("price:get_table", async (_payload, callback) => {
     try {
-      if (socket.client.approvalStatus !== "approved") {
+      if (socket.clientData.approvalStatus !== "approved") {
         return callback({
           success: false,
           error: "ACCESS_DENIED",
           message: "Your account must be approved by admin to view prices.",
-          approvalStatus: socket.client.approvalStatus,
+          approvalStatus: socket.clientData.approvalStatus,
         });
       }
 
@@ -97,7 +97,7 @@ module.exports = (clientNsp, socket) => {
   // ────────────────────────────────────────────────
   socket.on("price:calculate", async (payload, callback) => {
     try {
-      if (socket.client.approvalStatus !== "approved") {
+      if (socket.clientData.approvalStatus !== "approved") {
         return callback({
           success: false,
           error: "ACCESS_DENIED",
@@ -122,9 +122,9 @@ module.exports = (clientNsp, socket) => {
   // ────────────────────────────────────────────────
   socket.on("approval:check", async (_payload, callback) => {
     try {
-      const fresh = await clientService.getClientById(socket.client._id);
+      const fresh = await clientService.getClientById(socket.clientData._id);
       // Refresh cached client on socket
-      socket.client = fresh;
+      socket.clientData = fresh;
 
       callback({
         success: true,
@@ -147,7 +147,7 @@ module.exports = (clientNsp, socket) => {
       const { token, device } = payload;
       if (!token) return callback({ success: false, error: "Token is required" });
 
-      await notificationService.registerFCMToken(socket.client._id, token, device || "");
+      await notificationService.registerFCMToken(socket.clientData._id, token, device || "");
       callback({ success: true });
     } catch (err) {
       logger.error("fcm:register error:", err.message);
@@ -163,7 +163,7 @@ module.exports = (clientNsp, socket) => {
       const { token } = payload;
       if (!token) return callback({ success: false, error: "Token is required" });
 
-      await notificationService.unregisterFCMToken(socket.client._id, token);
+      await notificationService.unregisterFCMToken(socket.clientData._id, token);
       callback({ success: true });
     } catch (err) {
       callback({ success: false, error: err.message });
