@@ -2,11 +2,12 @@ const mongoose = require("mongoose");
 
 const clientSchema = new mongoose.Schema(
   {
-    // ── Firebase auth ──
+    // ── Auth ──
     firebaseUid: {
       type: String,
-      required: true,
+      sparse: true,
       unique: true,
+      default: null,
     },
     phone: {
       type: String,
@@ -37,6 +38,16 @@ const clientSchema = new mongoose.Schema(
       trim: true,
       uppercase: true,
       default: "",
+    },
+
+    // ── WhatsApp rate updates (2x daily) — mandatory during registration ──
+    rateUpdatesConsent: {
+      type: Boolean,
+      default: false,
+    },
+    rateUpdatesConsentAt: {
+      type: Date,
+      default: null,
     },
 
     // ── Profile completion flag ──

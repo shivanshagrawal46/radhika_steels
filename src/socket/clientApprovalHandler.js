@@ -138,7 +138,7 @@ module.exports = (io, socket) => {
 
       // Disconnect the client's socket if they're connected
       const clientNsp = io.of("/client");
-      clientNsp.to(`client:${client.firebaseUid}`).emit("account:blocked", {
+      clientNsp.to(`client:${client._id}`).emit("account:blocked", {
         message: "Your account has been blocked. Contact support.",
       });
 

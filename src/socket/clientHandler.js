@@ -26,7 +26,7 @@ module.exports = (clientNsp, socket) => {
   // ────────────────────────────────────────────────
   socket.on("profile:submit", async (profileData, callback) => {
     try {
-      const { name, firmName, email, gstNumber } = profileData || {};
+      const { name, firmName, email, gstNumber, rateUpdatesConsent } = profileData || {};
 
       if (!name || !firmName || !email || !gstNumber) {
         return callback({
@@ -35,11 +35,19 @@ module.exports = (clientNsp, socket) => {
         });
       }
 
+      if (!rateUpdatesConsent) {
+        return callback({
+          success: false,
+          error: "You must agree to receive daily steel rate updates on WhatsApp",
+        });
+      }
+
       const client = await clientService.submitProfile(socket.client._id, {
         name,
         firmName,
         email,
         gstNumber,
+        rateUpdatesConsent,
       });
 
       // Update the socket's cached client reference

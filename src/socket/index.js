@@ -2,9 +2,7 @@ const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const env = require("../config/env");
 const logger = require("../config/logger");
-const { Employee } = require("../models");
-const { verifyIdToken } = require("../config/firebase");
-const clientService = require("../services/clientService");
+const { Employee, Client } = require("../models");
 
 // Employee-side handlers
 const chatHandler = require("./chatHandler");
@@ -73,32 +71,27 @@ const init = (httpServer) => {
   });
 
   // ══════════════════════════════════════════════════
-  //  NAMESPACE "/client"  —  APP CLIENTS  (Firebase)
+  //  NAMESPACE "/client"  —  APP CLIENTS  (JWT)
   // ══════════════════════════════════════════════════
   const clientNsp = io.of("/client");
 
   clientNsp.use(async (socket, next) => {
     try {
-      const firebaseToken = socket.handshake.auth?.token;
-      if (!firebaseToken) return next(new Error("AUTH_REQUIRED"));
+      const token = socket.handshake.auth?.token;
+      if (!token) return next(new Error("AUTH_REQUIRED"));
 
-      // Verify the Firebase ID token from the client app
-      const decoded = await verifyIdToken(firebaseToken);
+      const decoded = jwt.verify(token, env.JWT_SECRET);
+      if (decoded.type !== "client") return next(new Error("AUTH_INVALID"));
 
-      // Firebase phone auth gives uid + phone_number
-      const uid = decoded.uid;
-      const phone = decoded.phone_number || "";
-
-      if (!phone) return next(new Error("PHONE_REQUIRED"));
-
-      // Find or create the client in our DB
-      const client = await clientService.findOrCreateByFirebase(uid, phone);
-
+      const client = await Client.findById(decoded.id);
+      if (!client) return next(new Error("AUTH_INVALID"));
       if (client.isBlocked) return next(new Error("ACCOUNT_BLOCKED"));
 
+      client.lastActiveAt = new Date();
+      await client.save();
+
       socket.client = client;
-      // Personal room so we can push approval updates to this exact client
-      socket.join(`client:${uid}`);
+      socket.join(`client:${client._id}`);
       next();
     } catch (err) {
       logger.warn("Client auth failed:", err.message);

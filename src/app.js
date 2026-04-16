@@ -9,6 +9,7 @@ const env = require("./config/env");
 const errorHandler = require("./middlewares/errorHandler");
 const webhookRoutes = require("./routes/webhook");
 const authRoutes = require("./routes/auth");
+const clientAuthRoutes = require("./routes/clientAuth");
 
 const app = express();
 
@@ -34,6 +35,7 @@ app.use("/uploads", express.static(path.resolve(__dirname, "../uploads")));
 app.use("/webhook", webhookRoutes);
 // Auth kept as HTTP so the client can get a JWT before opening the socket
 app.use("/api/auth", authRoutes);
+app.use("/api/client", clientAuthRoutes);
 
 // Health check
 app.get("/health", (_req, res) => {

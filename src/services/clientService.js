@@ -6,23 +6,18 @@ const AppError = require("../utils/AppError");
 const getIO = () => require("../socket").getIO();
 
 /**
- * Find or create a Client record after Firebase OTP verification.
- * Called the moment a client socket connects with a valid Firebase token.
+ * Find or create a Client record by phone number.
+ * Called by OTP verification after successful WhatsApp OTP.
  */
-const findOrCreateByFirebase = async (firebaseUid, phone) => {
+const findOrCreateByPhone = async (phone) => {
   const client = await Client.findOneAndUpdate(
-    { firebaseUid },
+    { phone },
     {
       $set: { lastActiveAt: new Date() },
-      $setOnInsert: { firebaseUid, phone },
+      $setOnInsert: { phone },
     },
     { upsert: true, returnDocument: "after" }
   );
-
-  if (!client.phone && phone) {
-    client.phone = phone;
-    await client.save();
-  }
 
   return client;
 };
@@ -31,7 +26,7 @@ const findOrCreateByFirebase = async (firebaseUid, phone) => {
  * Client submits their profile details after OTP registration.
  */
 const submitProfile = async (clientId, profileData) => {
-  const { name, firmName, email, gstNumber } = profileData;
+  const { name, firmName, email, gstNumber, rateUpdatesConsent } = profileData;
 
   const client = await Client.findById(clientId);
   if (!client) throw new AppError("Client not found", 404);
@@ -44,7 +39,11 @@ const submitProfile = async (clientId, profileData) => {
   client.firmName = firmName || client.firmName;
   client.email = email || client.email;
   client.gstNumber = gstNumber || client.gstNumber;
-  client.isProfileComplete = !!(name && firmName && email && gstNumber);
+  client.rateUpdatesConsent = !!rateUpdatesConsent;
+  if (rateUpdatesConsent && !client.rateUpdatesConsentAt) {
+    client.rateUpdatesConsentAt = new Date();
+  }
+  client.isProfileComplete = !!(name && firmName && email && gstNumber && rateUpdatesConsent);
 
   // Reset to pending if they were rejected and resubmit
   if (client.approvalStatus === "rejected") {
@@ -86,7 +85,7 @@ const approveClient = async (clientId, employeeId) => {
   // Notify the client app in real-time via the /client namespace
   const io = getIO();
   const clientNsp = io.of("/client");
-  clientNsp.to(`client:${client.firebaseUid}`).emit("approval:status", {
+  clientNsp.to(`client:${client._id}`).emit("approval:status", {
     approvalStatus: "approved",
     message: "Your account has been approved! You can now view prices.",
   });
@@ -112,7 +111,7 @@ const rejectClient = async (clientId, employeeId, reason = "") => {
   // Notify the client app in real-time
   const io = getIO();
   const clientNsp = io.of("/client");
-  clientNsp.to(`client:${client.firebaseUid}`).emit("approval:status", {
+  clientNsp.to(`client:${client._id}`).emit("approval:status", {
     approvalStatus: "rejected",
     reason,
     message: "Your account request was not approved. Please update your details and try again.",
@@ -183,7 +182,7 @@ const getApprovalCounts = async () => {
 };
 
 module.exports = {
-  findOrCreateByFirebase,
+  findOrCreateByPhone,
   submitProfile,
   approveClient,
   rejectClient,

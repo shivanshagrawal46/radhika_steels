@@ -6,6 +6,10 @@ const logger = require("./logger");
 
 let firebaseApp = null;
 
+/**
+ * Initialize Firebase Admin SDK — used ONLY for FCM push notifications.
+ * Client auth is handled by WhatsApp OTP + JWT (no Firebase Phone Auth).
+ */
 const initFirebase = () => {
   if (firebaseApp) return firebaseApp;
 
@@ -18,7 +22,6 @@ const initFirebase = () => {
         credential: admin.credential.cert(serviceAccount),
       });
     } else if (env.FIREBASE_PROJECT_ID) {
-      // Fallback: use individual env vars (works in cloud environments)
       firebaseApp = admin.initializeApp({
         credential: admin.credential.cert({
           projectId: env.FIREBASE_PROJECT_ID,
@@ -27,29 +30,17 @@ const initFirebase = () => {
         }),
       });
     } else {
-      // Application Default Credentials (GCP / Cloud Run / etc.)
       firebaseApp = admin.initializeApp();
     }
 
-    logger.info("Firebase Admin SDK initialised");
+    logger.info("Firebase Admin SDK initialised (FCM only)");
   } catch (err) {
     logger.error("Firebase init failed:", err.message);
-    logger.warn("Client auth will not work until Firebase is configured");
+    logger.warn("Push notifications will not work until Firebase is configured");
     return null;
   }
 
   return firebaseApp;
 };
 
-/**
- * Verify a Firebase ID token (sent by the client app after OTP login).
- * Returns the decoded token with uid, phone_number, etc.
- */
-const verifyIdToken = async (idToken) => {
-  if (!firebaseApp) {
-    throw new Error("Firebase not initialised — cannot verify token");
-  }
-  return admin.auth().verifyIdToken(idToken);
-};
-
-module.exports = { initFirebase, verifyIdToken };
+module.exports = { initFirebase };

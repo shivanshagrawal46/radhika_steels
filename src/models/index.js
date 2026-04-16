@@ -9,6 +9,7 @@ const BaseRate = require("./BaseRate");
 const Order = require("./Order");
 const Notification = require("./Notification");
 const Contact = require("./Contact");
+const Otp = require("./Otp");
 
 module.exports = {
   User,
@@ -22,4 +23,5 @@ module.exports = {
   Order,
   Notification,
   Contact,
+  Otp,
 };
