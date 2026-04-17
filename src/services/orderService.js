@@ -2,6 +2,35 @@ const { Order, Conversation } = require("../models");
 const AppError = require("../utils/AppError");
 const logger = require("../config/logger");
 
+// Attach a consistent payment summary to any order object (plain JSON from .lean()).
+// Frontend can read order.paymentSummary.{total,paid,remaining,...} directly —
+// no recomputation needed. Advance is flexible: customer can pay any amount,
+// so we only track actuals here — no "required advance" concept enforced.
+function withPaymentSummary(order) {
+  if (!order) return order;
+  const total = Math.round(Number(order?.pricing?.grandTotal) || 0);
+  // Prefer sum of payments[] (most accurate); fall back to advancePayment.amount.
+  const paidFromPayments = Array.isArray(order.payments)
+    ? order.payments.reduce((s, p) => s + (Number(p?.amount) || 0), 0)
+    : 0;
+  const paid = Math.round(paidFromPayments || Number(order?.advancePayment?.amount) || 0);
+  const remaining = Math.max(0, total - paid);
+  order.paymentSummary = {
+    total,
+    paid,
+    remaining,
+    fullyPaid: remaining === 0 && total > 0,
+    paymentStatus: total === 0
+      ? "no_pricing"
+      : paid === 0
+        ? "unpaid"
+        : remaining === 0
+          ? "fully_paid"
+          : "partially_paid",
+  };
+  return order;
+}
+
 const createOrder = async (orderData) => {
   const order = await Order.create(orderData);
   logger.info(`Order created: ${order.orderNumber}`);
@@ -18,7 +47,7 @@ const getOrderById = async (orderId) => {
     .lean();
 
   if (!order) throw new AppError("Order not found", 404);
-  return order;
+  return withPaymentSummary(order);
 };
 
 const updateOrderStatus = async (orderId, status, employeeId) => {
@@ -102,7 +131,7 @@ const getOrdersByUser = async (userId, page = 1, limit = 20) => {
     Order.countDocuments({ user: userId }),
   ]);
 
-  return { orders, total, page, totalPages: Math.ceil(total / limit) };
+  return { orders: orders.map(withPaymentSummary), total, page, totalPages: Math.ceil(total / limit) };
 };
 
 const getOrdersByStatus = async (status, page = 1, limit = 20) => {
@@ -120,7 +149,7 @@ const getOrdersByStatus = async (status, page = 1, limit = 20) => {
     Order.countDocuments(filter),
   ]);
 
-  return { orders, total, page, totalPages: Math.ceil(total / limit) };
+  return { orders: orders.map(withPaymentSummary), total, page, totalPages: Math.ceil(total / limit) };
 };
 
 const getActiveOrderForUser = async (userId) => {

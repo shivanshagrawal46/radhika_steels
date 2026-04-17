@@ -12,6 +12,10 @@ const orderItemSchema = new mongoose.Schema(
     size: { type: String, default: null },
     gauge: { type: String, default: null },
     mm: { type: String, default: null },
+    // User's exact requested mm range for HB wire, e.g. "5.2-5.3" or "5.3".
+    // Gauge-only queries (no mm specified) leave this null. Admin relies on
+    // this to know which specific size within the gauge the customer wants.
+    mmRange: { type: String, default: null },
     carbonType: { type: String, enum: ["normal", "lc"], default: "normal" },
     quantity: { type: Number, required: true, min: 0 },
     unit: { type: String, default: "ton" },

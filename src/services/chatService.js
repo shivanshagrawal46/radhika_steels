@@ -71,7 +71,10 @@ function getDisplayName(user, contacts) {
 async function processOrderConfirmation(orderResult, conversation, user, io, from, displayName) {
   const items = orderResult.items.map((i) => ({
     category: i.category, size: i.size || null, gauge: i.gauge || null,
-    mm: i.mm || null, carbonType: i.carbon_type || "normal", quantity: i.quantity || 0,
+    mm: i.mm || null,
+    // Carry the user's exact requested mm range (e.g. "5.2-5.3") through to the order
+    mmRange: i.mm_range || i.mmRange || null,
+    carbonType: i.carbon_type || "normal", quantity: i.quantity || 0,
   }));
 
   const totalQty = items.reduce((sum, i) => sum + (i.quantity || 0), 0);
@@ -100,10 +103,28 @@ async function processOrderConfirmation(orderResult, conversation, user, io, fro
     const unitPrice = price ? price.total : 0;
     const itemTotal = Math.round(unitPrice * (item.quantity || 0));
     grandTotal += itemTotal;
+    // Build product name that reflects user's exact size preference.
+    // Examples:
+    //   "HB Wire 5g (5.2-5.3mm)" when user asked "5.2 se 5.3 mm"
+    //   "HB Wire 5g (5.3mm)" when user said "5.3 dia"
+    //   "HB Wire 12g" when user only gave gauge
+    //   "WR 5.5mm" for WR (unchanged)
+    let productName;
+    if (price) {
+      if (item.category === "hb" && item.mmRange) {
+        productName = `HB Wire ${price.gauge || item.gauge || ""}g (${item.mmRange}mm)`.replace(/\s+/g, " ").trim();
+      } else {
+        productName = price.label;
+      }
+    } else {
+      productName = `${(item.category || "").toUpperCase()} ${item.size || item.gauge || ""}`.trim();
+    }
+
     orderItems.push({
       category: item.category,
-      productName: price ? price.label : `${(item.category || "").toUpperCase()} ${item.size || item.gauge || ""}`.trim(),
-      size: item.size, gauge: item.gauge, mm: item.mm, carbonType: item.carbonType,
+      productName,
+      size: item.size, gauge: item.gauge, mm: item.mm, mmRange: item.mmRange || null,
+      carbonType: item.carbonType,
       quantity: item.quantity, unit: "ton", unitPrice, totalPrice: itemTotal,
     });
   }
@@ -116,7 +137,10 @@ async function processOrderConfirmation(orderResult, conversation, user, io, fro
       items: orderItems,
       pricing: { grandTotal },
       status: "advance_pending",
-      advancePayment: { amount: responseBuilder.ADVANCE_AMOUNT, isPaid: false },
+      // advancePayment.amount = ACTUAL amount paid so far (starts at 0).
+      // Required advance (₹50,000) is a constant — do NOT pre-fill here or
+      // recordAdvancePayment() will double-count it on the first payment.
+      advancePayment: { amount: 0, isPaid: false },
       notes: orderResult.customer_note || "",
     });
 
@@ -145,7 +169,10 @@ async function processOrderConfirmation(orderResult, conversation, user, io, fro
     logger.info(`[ORDER] ${order.orderNumber} created, total=₹${grandTotal}`);
 
     // Only build confirmation text AFTER successful DB save
-    let confirmText = await responseBuilder.buildOrderConfirmation(items);
+    let confirmText = await responseBuilder.buildOrderConfirmation(items, {
+      orderNumber: order.orderNumber,
+      paidAmount: 0,
+    });
 
     // If user doesn't have billing details yet, ask for them
     const hasBilling = user.firmName || user.gstNo;
@@ -353,6 +380,7 @@ const handleIncomingMessage = async (parsed) => {
       parsedIntent.size = oldParsed.size;
       parsedIntent.gauge = oldParsed.gauge;
       parsedIntent.mm = oldParsed.mm;
+      parsedIntent.mmRange = oldParsed.mmRange;
       parsedIntent.carbonType = oldParsed.carbonType;
       parsedIntent.quantity = oldParsed.quantity || parsedIntent.quantity;
       parsedIntent.intent = "price_inquiry";
@@ -367,6 +395,7 @@ const handleIncomingMessage = async (parsed) => {
       parsedIntent.size = oldParsed.size;
       parsedIntent.gauge = oldParsed.gauge;
       parsedIntent.mm = oldParsed.mm;
+      parsedIntent.mmRange = oldParsed.mmRange;
       parsedIntent.carbonType = oldParsed.carbonType;
       parsedIntent.quantity = oldParsed.quantity || parsedIntent.quantity;
       parsedIntent.unit = oldParsed.unit || parsedIntent.unit;
@@ -381,6 +410,7 @@ const handleIncomingMessage = async (parsed) => {
     parsedIntent.size = ctx.size || null;
     parsedIntent.gauge = ctx.gauge || null;
     parsedIntent.mm = ctx.mm || null;
+    parsedIntent.mmRange = ctx.mmRange || null;
     parsedIntent.carbonType = ctx.carbonType || "normal";
     parsedIntent.intent = "price_inquiry";
     parsedIntent.confidence = 0.9;
@@ -406,6 +436,7 @@ const handleIncomingMessage = async (parsed) => {
           parsedIntent.size = msgParsed.size || null;
           parsedIntent.gauge = msgParsed.gauge || null;
           parsedIntent.mm = msgParsed.mm || null;
+          parsedIntent.mmRange = msgParsed.mmRange || null;
           parsedIntent.carbonType = msgParsed.carbonType || "normal";
           parsedIntent.quantity = parsedIntent.quantity || msgParsed.quantity || null;
           parsedIntent.unit = parsedIntent.unit || msgParsed.unit || "ton";
@@ -421,6 +452,7 @@ const handleIncomingMessage = async (parsed) => {
         parsedIntent.size = ctx.size || null;
         parsedIntent.gauge = ctx.gauge || null;
         parsedIntent.mm = ctx.mm || null;
+        parsedIntent.mmRange = ctx.mmRange || null;
         parsedIntent.carbonType = ctx.carbonType || "normal";
         parsedIntent.quantity = null;
         parsedIntent.unit = ctx.unit || "ton";
@@ -506,6 +538,7 @@ const handleIncomingMessage = async (parsed) => {
       unit: parsedIntent.unit || "",
       gauge: parsedIntent.gauge || "",
       mm: parsedIntent.mm || "",
+      mmRange: parsedIntent.mmRange || "",
     };
   }
   if (parsedIntent.intent === "negotiation") conversation.context.negotiationActive = true;
@@ -558,6 +591,7 @@ const handleIncomingMessage = async (parsed) => {
     logger.info(`[CHAT] Multi-item detected: ${multiItems.length} items`);
     const prices = [];
     const quantities = [];
+    const userMmRanges = [];
     for (const item of multiItems) {
       try {
         let price;
@@ -571,17 +605,19 @@ const handleIncomingMessage = async (parsed) => {
         if (price) {
           prices.push(price);
           quantities.push(item.quantity || 0);
+          userMmRanges.push(item.mmRange || null);
         }
       } catch (err) {
         logger.warn(`[CHAT] Multi-item price calc failed: ${err.message}`);
       }
     }
     if (prices.length >= 2) {
-      responseText = responseBuilder.buildMultiPriceResponse(prices, quantities);
+      responseText = responseBuilder.buildMultiPriceResponse(prices, quantities, userMmRanges);
       parsedIntent.intent = "price_inquiry";
       conversation.context.lastMultiItems = multiItems.map((i) => ({
         category: i.category, size: i.size || "", gauge: i.gauge || "",
-        mm: i.mm || "", carbonType: i.carbonType || "normal", quantity: i.quantity || 0,
+        mm: i.mm || "", mmRange: i.mmRange || "",
+        carbonType: i.carbonType || "normal", quantity: i.quantity || 0,
       }));
       conversation.markModified("context");
     }
@@ -704,6 +740,7 @@ const handleIncomingMessage = async (parsed) => {
               size: parsedIntent.size || null,
               gauge: parsedIntent.gauge || null,
               mm: parsedIntent.mm || null,
+              mm_range: parsedIntent.mmRange || null,
               carbon_type: parsedIntent.carbonType || "normal",
               quantity: parsedIntent.quantity,
             }],

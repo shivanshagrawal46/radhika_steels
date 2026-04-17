@@ -157,6 +157,7 @@ function parse(text) {
     unit: null,
     gauge: null,
     mm: null,
+    mmRange: null, // user-given mm range string e.g. "5.2-5.3" (preserves what user actually said)
   };
 
   // 1. Simple intents — greeting and thanks (only full-match, nothing else in message)
@@ -205,6 +206,11 @@ function parse(text) {
     if (isHBMmRange(avgMm)) {
       result.mm = String(avgMm);
       result.gauge = mmToGauge(avgMm);
+      // Keep the exact user-given range (e.g. "5.2-5.3") so order + reply
+      // can echo the specific size the customer asked for.
+      const lo = Math.min(mm1, mm2);
+      const hi = Math.max(mm1, mm2);
+      result.mmRange = `${lo}-${hi}`;
       if (!result.category) result.category = "hb";
     }
   }
@@ -219,6 +225,7 @@ function parse(text) {
       if (isHBMmRange(mmVal) && !AVAILABLE_WR_SIZES.includes(mmSingle[1]) && !looksLikeWR) {
         result.mm = mmSingle[1];
         result.gauge = mmToGauge(mmVal);
+        result.mmRange = mmSingle[1]; // single exact value the user gave
         if (!result.category) result.category = "hb";
       }
     }

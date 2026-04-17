@@ -143,7 +143,7 @@ OTHER:
 
 - Minimum per item: 2 ton
 - Minimum total order: 5 ton
-- Advance payment: ₹50,000 for booking
+- Booking advance: flexible — customer sends any amount to book; no fixed minimum enforced
 - Balance: at the time of loading
 - Transport: customer's side
 
@@ -323,7 +323,7 @@ STRICT RULES:
 - For negotiation: "Aapki baat team tak pahunchata hoon"
 - For delivery WITHOUT DB data: "Status check karke update deta hoon"
 - For delivery WITH DB data: share the delivery date, driver name, vehicle number from the DB context
-- For order process: minimum 2 ton per item, total 5 ton. Advance ₹50,000.
+- For order process: minimum 2 ton per item, total 5 ton. Advance flexible — customer sends any amount to book.
 - If customer's party/firm details (GST, firm name) are already in DB, do NOT ask again.
 
 WHAT YOU CAN DO: greet, acknowledge, clarify questions, reassure, share delivery info from DB
@@ -404,13 +404,21 @@ REPLY-TO CONTEXT:
   parse the product and quantity from the breakdown shown in that message.
 
 LANGUAGE: Hindi/Hinglish/English mixed. Examples:
-- "5.5 3 ton aur hb 5g 5.2 se 5.3mm 2 ton book karo" = WR 5.5mm 3 ton + HB 5g 2 ton
+- "5.5 3 ton aur hb 5g 5.2 se 5.3mm 2 ton book karo" = WR 5.5mm 3 ton + HB 5g 2 ton (mm_range="5.2-5.3")
 - "pakka karo 12mm 5 ton" = WR 12mm 5 ton confirmed
 - "le lo 10 ton 5.5" = WR 5.5mm 10 ton confirmed
 - "5.5 dia 5 mts book karo" = 5.5mm (WR size) 5 ton confirmed
 - "8 dia 3 mts aur hb 12g 2 mts le lo" = WR 8mm 3 ton + HB 12g 2 ton confirmed
 - User replies "ye confirm karo" to old message showing "WR 12mm 5 ton" = WR 12mm 5 ton confirmed
 - User replies "book karo" to old price quote = order those exact items
+
+⚠️ HB MM RANGE — CRITICAL:
+Whenever the customer specifies an HB wire mm size or range (e.g. "5.2 se 5.3",
+"5.3 mm", "4.8-5.0"), set BOTH gauge AND mm_range fields:
+- "5.2 se 5.3 mm 6 ton" → gauge="5", mm_range="5.2-5.3", quantity=6
+- "5.3 dia 2 ton"       → gauge="5", mm_range="5.3",      quantity=2
+- "hb 5g 2 ton"         → gauge="5", mm_range=""          (no specific mm given)
+Admin uses mm_range to know the EXACT size the customer wants. Never drop it.
 
 Return ONLY the function call.`;
 
@@ -436,7 +444,11 @@ const ORDER_VERIFY_TOOLS = [
                 category: { type: "string", enum: ["wr", "hb"] },
                 size: { type: "string", description: "WR size in mm (e.g. '5.5'). Empty if HB." },
                 gauge: { type: "string", description: "HB gauge (e.g. '5', '3/0'). Empty if WR." },
-                mm: { type: "string", description: "HB mm range (e.g. '5.3'). Empty if WR or not specified." },
+                mm: { type: "string", description: "HB single mm value (e.g. '5.3'). Empty if WR or not specified." },
+                mm_range: {
+                  type: "string",
+                  description: "User's EXACT requested mm range for HB wire as they said it — e.g. '5.2-5.3' for '5.2 se 5.3 mm', or '5.3' if they gave a single value. Empty if WR or only gauge was given.",
+                },
                 carbon_type: { type: "string", enum: ["normal", "lc"] },
                 quantity: { type: "number", description: "Quantity in tons" },
               },

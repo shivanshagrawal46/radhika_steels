@@ -50,10 +50,20 @@ const buildMmSubRanges = (mmRange) => {
 
 // ──────────────────────────────────────────────
 // HB Price Response
+// Builds label using the user's exact mm range when they specified one
+// (e.g. "HB Wire 5g (5.2-5.3mm)"), else falls back to the gauge's full
+// range from pricingService (e.g. "HB Wire 5g (5.2-5.6mm)").
 // ──────────────────────────────────────────────
-const buildHBResponse = (price, quantity, askForMm = false) => {
+const buildHBLabel = (price, userMmRange) => {
+  if (userMmRange && price && price.gauge) {
+    return `HB Wire ${price.gauge}g (${userMmRange}mm)`;
+  }
+  return price ? price.label : "HB Wire";
+};
+
+const buildHBResponse = (price, quantity, askForMm = false, userMmRange = null) => {
   let msg = `${BRAND}\n\n`;
-  msg += `*${price.label}*\n`;
+  msg += `*${buildHBLabel(price, userMmRange)}*\n`;
   msg += `${INR(price.mergedBase)} + ${INR(price.fixedCharge)} + ${price.gstPercent}% GST\n`;
   msg += `*${INR(price.total)}/ton*`;
 
@@ -62,7 +72,7 @@ const buildHBResponse = (price, quantity, askForMm = false) => {
     msg += `\n\n${quantity} ton × ${INR(price.total)} = *${INR(grandTotal)}*`;
   }
 
-  if (askForMm && price.mmRange) {
+  if (askForMm && price.mmRange && !userMmRange) {
     const subRanges = buildMmSubRanges(price.mmRange);
     msg += `\n\n*${price.gauge}g sizes:*\n`;
     msg += subRanges.join("  |  ");
@@ -114,15 +124,21 @@ const shortLabel = (label) => label.replace(/\s*\([\d.]+-[\d.]+mm\)/, "");
 
 // ──────────────────────────────────────────────
 // Multi-product response
+// userMmRanges[i] (optional) — user's exact mm range for HB items
 // ──────────────────────────────────────────────
-const buildMultiPriceResponse = (prices, quantities) => {
+const buildMultiPriceResponse = (prices, quantities, userMmRanges = []) => {
   let msg = `${BRAND}`;
   let grandTotal = 0;
 
   for (let i = 0; i < prices.length; i++) {
     const p = prices[i];
     const qty = quantities[i] || 0;
-    msg += `\n\n▸ *${shortLabel(p.label)}*`;
+    const userRange = userMmRanges[i] || null;
+    // Use user's range for HB when provided, else short label
+    const label = (userRange && p && p.gauge)
+      ? `HB Wire ${p.gauge}g (${userRange}mm)`
+      : shortLabel(p.label);
+    msg += `\n\n▸ *${label}*`;
     msg += `\n${INR(p.mergedBase)} + ${INR(p.fixedCharge)} + ${p.gstPercent}% GST = *${INR(p.total)}/ton*`;
     if (qty > 0) {
       const itemTotal = Math.round(p.total * qty);
@@ -147,9 +163,28 @@ const MIN_QTY_PER_ITEM = 2;
 const MIN_QTY_TOTAL = 5;
 const ADVANCE_AMOUNT = 50000;
 
-const buildOrderConfirmation = async (items) => {
+// Build the display label for a single order item — uses user's exact mm
+// range for HB wire when provided.
+const buildItemLabel = (item, price) => {
+  if (item.category === "hb" && item.mmRange && price && price.gauge) {
+    return `HB Wire ${price.gauge}g (${item.mmRange}mm)`;
+  }
+  return shortLabel(price ? price.label : "");
+};
+
+/**
+ * Order confirmation message.
+ * @param {Array} items    order items (each may carry mmRange for HB)
+ * @param {Object} opts
+ *   @param {string} [opts.orderNumber]  — order #, shown at top if provided
+ *   @param {number} [opts.paidAmount]   — total paid so far (₹). Default 0.
+ */
+const buildOrderConfirmation = async (items, opts = {}) => {
+  const { orderNumber = null, paidAmount = 0 } = opts;
+
   let msg = `${BRAND}\n`;
   msg += `✅ *Order Confirmed*`;
+  if (orderNumber) msg += `\nOrder #: *${orderNumber}*`;
 
   let grandTotal = 0;
   let totalQty = 0;
@@ -181,7 +216,7 @@ const buildOrderConfirmation = async (items) => {
     grandTotal += itemTotal;
     totalQty += qty;
 
-    msg += `\n\n▸ *${shortLabel(price.label)}*`;
+    msg += `\n\n▸ *${buildItemLabel(item, price)}*`;
     msg += `\n${INR(price.mergedBase)} + ${INR(price.fixedCharge)} + ${price.gstPercent}% GST = *${INR(price.total)}/ton*`;
     if (qty > 0) {
       msg += `\n${qty} ton × ${INR(price.total)} = *${INR(itemTotal)}*`;
@@ -191,14 +226,47 @@ const buildOrderConfirmation = async (items) => {
   msg += `\n\n─────────────────`;
   msg += `\n*Total: ${totalQty} ton — ${INR(grandTotal)}*`;
 
+  // Payment summary — always shows Total / Paid / Remaining.
+  // Advance is flexible — customer can pay any amount (less than, equal to,
+  // or more than the suggested booking amount). We only report actuals here.
+  const paid = Math.max(0, Number(paidAmount) || 0);
+  const remaining = Math.max(0, grandTotal - paid);
   msg += `\n\n*Payment:*`;
-  msg += `\nAdvance: *${INR(ADVANCE_AMOUNT)}* (booking ke liye)`;
-  msg += `\nBalance: *${INR(Math.max(0, grandTotal - ADVANCE_AMOUNT))}* (loading pe)`;
-  msg += `\nTransport: Aapki taraf se`;
+  msg += `\nTotal Amount: *${INR(grandTotal)}*`;
+  msg += `\nPaid: *${INR(paid)}*`;
+  msg += `\nRemaining: *${INR(remaining)}*`;
 
-  msg += `\n\n✅ Advance milte hi dispatch schedule hoga.`;
-  msg += `\n🙏 Dhanyawad!`;
+  if (paid === 0) {
+    msg += `\n\nBooking ke liye advance bhejiye. Transport aapki taraf se.`;
+    msg += `\n_Advance milte hi dispatch schedule hoga._`;
+  } else if (remaining > 0) {
+    msg += `\n\nBalance *${INR(remaining)}* loading ke time. Transport aapki taraf se.`;
+  } else {
+    msg += `\n\n✅ *Full payment received.* Dispatch ke liye ready.`;
+  }
 
+  msg += `\n\n🙏 Dhanyawad!`;
+
+  return msg;
+};
+
+/**
+ * Post-payment / status-update summary (short version). Reuses the same
+ * Total / Paid / Remaining block so the customer always sees consistent
+ * numbers whenever we message them about their order.
+ */
+const buildOrderPaymentSummary = (order) => {
+  const grandTotal = Math.round(order?.pricing?.grandTotal || 0);
+  const paid = Math.round(order?.advancePayment?.amount || 0);
+  const remaining = Math.max(0, grandTotal - paid);
+
+  let msg = `${BRAND}\n\n`;
+  msg += `*Order: ${order?.orderNumber || "N/A"}*\n`;
+  msg += `Status: *${String(order?.status || "pending").replace(/_/g, " ").toUpperCase()}*\n`;
+  msg += `\n*Payment Summary:*`;
+  msg += `\nTotal Amount: *${INR(grandTotal)}*`;
+  msg += `\nPaid: *${INR(paid)}*`;
+  msg += `\nRemaining: *${INR(remaining)}*`;
   return msg;
 };
 
@@ -294,7 +362,7 @@ const TEMPLATES = {
 
   delivery_inquiry: null,
 
-  order_inquiry: `${BRAND}\n\nOrder ke liye:\n\n▸ Har item minimum *2 ton*\n▸ Total minimum *5 ton*\n▸ Advance: *₹50,000* (booking ke liye)\n▸ Balance: loading ke time\n▸ Transport: aapki taraf se\n\nProduct aur quantity bataiye, order process kar denge.`,
+  order_inquiry: `${BRAND}\n\nOrder ke liye:\n\n▸ Har item minimum *2 ton*\n▸ Total minimum *5 ton*\n▸ Booking advance: bhejiye (amount aapki suvidha anusaar)\n▸ Balance: loading ke time\n▸ Transport: aapki taraf se\n\nProduct aur quantity bataiye, order process kar denge.`,
 
   order_confirm_ask: `${BRAND}\n\nOrder confirm karne ke liye batayein:\n\n▸ Product aur size\n▸ Quantity (kitna ton)\n▸ Delivery location\n▸ Firm name / GST no.\n\n_Details milte hi process karenge._`,
 };
@@ -305,7 +373,7 @@ const getTemplate = (key) => TEMPLATES[key] || null;
 // Main entry
 // ──────────────────────────────────────────────
 const buildFromIntent = async (parsedIntent) => {
-  const { intent, category, size, carbonType, quantity, gauge, mm, sizeAvailable } = parsedIntent;
+  const { intent, category, size, carbonType, quantity, gauge, mm, mmRange, sizeAvailable } = parsedIntent;
 
   if (intent === "greeting") {
     const text = await buildGreeting();
@@ -341,7 +409,7 @@ const buildFromIntent = async (parsedIntent) => {
         price = await pricingService.calculatePrice("hb", { gauge: "12" });
         askForMm = true;
       }
-      return { text: buildHBResponse(price, quantity, askForMm), usedGPT: false };
+      return { text: buildHBResponse(price, quantity, askForMm, mmRange), usedGPT: false };
     }
 
     if (!category) {
@@ -363,6 +431,7 @@ module.exports = {
   buildUnavailableSizeResponse,
   buildMultiPriceResponse,
   buildOrderConfirmation,
+  buildOrderPaymentSummary,
   buildMinQtyError,
   buildOrderQuantityAsk,
   buildGreeting,
