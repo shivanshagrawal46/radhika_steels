@@ -251,13 +251,13 @@ const buildDeliveryResponse = (order) => {
   msg += `*Order: ${order.orderNumber || "N/A"}*\n`;
   msg += `Status: *${status}*\n`;
 
-  const dateFmt = { day: "numeric", month: "short", year: "numeric" };
-  if (d.scheduledDate) msg += `\nDelivery Date: *${new Date(d.scheduledDate).toLocaleDateString("en-IN", dateFmt)}*`;
-  if (d.dispatchedAt) msg += `\nDispatched: *${new Date(d.dispatchedAt).toLocaleDateString("en-IN", dateFmt)}*`;
+  const { formatIstDate } = require("../utils/dateUtils");
+  if (d.scheduledDate) msg += `\nDelivery Date: *${formatIstDate(d.scheduledDate)}*`;
+  if (d.dispatchedAt) msg += `\nDispatched: *${formatIstDate(d.dispatchedAt)}*`;
   if (d.driverName) msg += `\nDriver: *${d.driverName}*`;
   if (d.driverPhone) msg += `\nDriver Phone: *${d.driverPhone}*`;
   if (d.vehicleNumber) msg += `\nVehicle: *${d.vehicleNumber}*`;
-  if (d.deliveredAt) msg += `\nDelivered: *${new Date(d.deliveredAt).toLocaleDateString("en-IN", dateFmt)}*`;
+  if (d.deliveredAt) msg += `\nDelivered: *${formatIstDate(d.deliveredAt)}*`;
 
   if (!d.scheduledDate && !d.dispatchedAt && !d.driverName && !d.driverPhone && !d.vehicleNumber) {
     msg += `\nDelivery details abhi update nahi hui hain. Jaldi update milega.`;

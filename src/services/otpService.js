@@ -105,6 +105,23 @@ const verifyOtp = async (phone, code) => {
     { upsert: true, returnDocument: "after" }
   );
 
+  // Ensure a matching WhatsApp User doc exists so orders from either channel
+  // (WhatsApp bot OR app) roll up to a single contact keyed by phone.
+  const { User } = require("../models");
+  await User.findOneAndUpdate(
+    { $or: [{ phone: normalized }, { waId: normalized }] },
+    { $setOnInsert: { phone: normalized, waId: normalized } },
+    { upsert: true, returnDocument: "after" }
+  );
+
+  // Real-time: notify admin dashboards that a new contact appeared / updated
+  try {
+    const contactsService = require("./contactsService");
+    contactsService.emitContactUpdated(normalized);
+  } catch (err) {
+    logger.warn(`[OTP] contact emit failed: ${err.message}`);
+  }
+
   const token = generateClientToken(client._id);
 
   logger.info(`[OTP] Verified for ${normalized}, client=${client._id}`);

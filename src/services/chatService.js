@@ -134,7 +134,13 @@ async function processOrderConfirmation(orderResult, conversation, user, io, fro
       grandTotal,
       userId: user._id.toString(),
       userName: displayName || user.name || from,
+      phone: user.phone || user.waId,
     });
+
+    // Also refresh unified contacts row in real-time
+    try {
+      require("./contactsService").emitContactUpdated(user.phone || user.waId);
+    } catch (_) { /* noop */ }
 
     logger.info(`[ORDER] ${order.orderNumber} created, total=₹${grandTotal}`);
 
@@ -245,11 +251,12 @@ const handleIncomingMessage = async (parsed) => {
         const itemsStr = o.items.map((it) => `${it.category?.toUpperCase()} ${it.size || it.gauge || ""}${it.carbonType === "lc" ? " LC" : ""} ${it.quantity}T`).join(", ");
         const delivery = o.delivery || {};
         let delStr = "";
-        if (delivery.scheduledDate) delStr += ` DeliveryDate=${new Date(delivery.scheduledDate).toLocaleDateString("en-IN")}`;
+        const { formatIstDate } = require("../utils/dateUtils");
+        if (delivery.scheduledDate) delStr += ` DeliveryDate=${formatIstDate(delivery.scheduledDate)}`;
         if (delivery.driverName) delStr += ` Driver=${delivery.driverName}`;
         if (delivery.driverPhone) delStr += ` DriverPh=${delivery.driverPhone}`;
         if (delivery.vehicleNumber) delStr += ` Vehicle=${delivery.vehicleNumber}`;
-        if (delivery.dispatchedAt) delStr += ` Dispatched=${new Date(delivery.dispatchedAt).toLocaleDateString("en-IN")}`;
+        if (delivery.dispatchedAt) delStr += ` Dispatched=${formatIstDate(delivery.dispatchedAt)}`;
         return `Order#${o.orderNumber} Status=${o.status} Items=[${itemsStr}] Total=₹${o.pricing?.grandTotal || 0}${delStr}`;
       });
       dbContext += `\n\nACTIVE ORDERS for this customer:\n${orderLines.join("\n")}`;
@@ -311,6 +318,9 @@ const handleIncomingMessage = async (parsed) => {
 
         io.to(`conv:${conversation._id}`).emit("chat:new_message", { conversationId: conversation._id.toString(), message: billingAiMsg.toObject() });
         io.to("employees").emit("chat:party_updated", { userId: user._id.toString(), updates });
+        try {
+          require("./contactsService").emitContactUpdated(user.phone || user.waId);
+        } catch (_) { /* noop */ }
 
         logger.info(`[CHAT] Billing details saved for user ${from}: firm=${billing.firm_name}, gst=${billing.gst_no}`);
         logger.info(`[CHAT] ─── END from=${from} — BILLING SAVED ───`);
@@ -1140,6 +1150,12 @@ function emitToDashboard(io, conversation, incomingMsg, isNewConversation, parse
         needsAttention: conversation.needsAttention || false,
         needsAttentionReason: conversation.needsAttentionReason || "",
       });
+
+      // Keep unified contacts list in sync for the admin dashboard
+      try {
+        const phone = convForEmit?.user?.phone || convForEmit?.user?.waId;
+        if (phone) require("./contactsService").emitContactUpdated(phone);
+      } catch (_) { /* noop */ }
     })
     .catch((err) => logger.error(`[CHAT] Dashboard emit failed: ${err.message}`));
 }
@@ -1276,6 +1292,10 @@ const updatePartyDetails = async (userId, details) => {
 
   const user = await User.findByIdAndUpdate(userId, { $set: update }, { returnDocument: "after" }).lean();
   if (!user) throw new AppError("User not found", 404);
+
+  try {
+    require("./contactsService").emitContactUpdated(user.phone || user.waId);
+  } catch (_) { /* noop */ }
 
   logger.info(`[CHAT] Party details updated for user=${userId}`);
   return user;

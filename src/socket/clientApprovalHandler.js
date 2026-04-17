@@ -59,6 +59,43 @@ module.exports = (io, socket) => {
   });
 
   // ────────────────────────────────────────────────
+  // client:create — admin manually creates a new client
+  // ────────────────────────────────────────────────
+  socket.on("client:create", async (payload, callback) => {
+    try {
+      if (!["admin", "manager"].includes(socket.employee.role)) {
+        return callback({ success: false, error: "Insufficient permissions" });
+      }
+
+      const client = await clientService.createClientByAdmin(payload || {}, socket.employee._id);
+      callback({ success: true, data: client });
+    } catch (err) {
+      logger.error("client:create error:", err.message);
+      callback({ success: false, error: err.message });
+    }
+  });
+
+  // ────────────────────────────────────────────────
+  // client:update — admin edits client details
+  // ────────────────────────────────────────────────
+  socket.on("client:update", async (payload, callback) => {
+    try {
+      if (!["admin", "manager"].includes(socket.employee.role)) {
+        return callback({ success: false, error: "Insufficient permissions" });
+      }
+
+      const { clientId, ...updates } = payload || {};
+      if (!clientId) return callback({ success: false, error: "clientId is required" });
+
+      const client = await clientService.updateClientByAdmin(clientId, updates, socket.employee._id);
+      callback({ success: true, data: client });
+    } catch (err) {
+      logger.error("client:update error:", err.message);
+      callback({ success: false, error: err.message });
+    }
+  });
+
+  // ────────────────────────────────────────────────
   // client:approve — admin approves a client
   // ────────────────────────────────────────────────
   socket.on("client:approve", async (payload, callback) => {

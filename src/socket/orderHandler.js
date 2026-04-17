@@ -1,6 +1,15 @@
 const { Order, Conversation, User, Contact } = require("../models");
 const orderService = require("../services/orderService");
+const contactsService = require("../services/contactsService");
 const logger = require("../config/logger");
+
+// Helper: emit unified contact:updated for a given order (resolves phone from user)
+async function emitContactForOrder(order) {
+  try {
+    const user = await User.findById(order.user).select("phone waId").lean();
+    if (user) contactsService.emitContactUpdated(user.phone || user.waId);
+  } catch (_) { /* noop */ }
+}
 
 module.exports = (io, socket) => {
   // ── order:list ──
@@ -49,6 +58,7 @@ module.exports = (io, socket) => {
       });
 
       io.to("employees").emit("order:new", order);
+      emitContactForOrder(order);
       callback({ success: true, data: order });
     } catch (err) {
       logger.error("order:create error:", err.message);
@@ -74,6 +84,7 @@ module.exports = (io, socket) => {
         });
       }
 
+      emitContactForOrder(order);
       io.to("employees").emit("order:updated", {
         orderId: order._id.toString(),
         orderNumber: order.orderNumber,
@@ -109,6 +120,7 @@ module.exports = (io, socket) => {
         }
       }
 
+      emitContactForOrder(order);
       io.to("employees").emit("order:updated", {
         orderId: order._id.toString(),
         orderNumber: order.orderNumber,
@@ -152,6 +164,7 @@ module.exports = (io, socket) => {
         await Conversation.findByIdAndUpdate(order.conversation, { stage: "advance_received" });
       }
 
+      emitContactForOrder(order);
       io.to("employees").emit("order:updated", {
         orderId: order._id.toString(),
         orderNumber: order.orderNumber,
@@ -182,6 +195,7 @@ module.exports = (io, socket) => {
 
       await order.save();
 
+      emitContactForOrder(order);
       io.to("employees").emit("order:updated", {
         orderId: order._id.toString(),
         orderNumber: order.orderNumber,
@@ -211,6 +225,7 @@ module.exports = (io, socket) => {
         await Conversation.findByIdAndUpdate(order.conversation, { stage: "dispatched" });
       }
 
+      emitContactForOrder(order);
       io.to("employees").emit("order:updated", {
         orderId: order._id.toString(),
         orderNumber: order.orderNumber,
@@ -241,6 +256,7 @@ module.exports = (io, socket) => {
         await Conversation.findByIdAndUpdate(order.conversation, { stage: "delivered" });
       }
 
+      emitContactForOrder(order);
       io.to("employees").emit("order:updated", {
         orderId: order._id.toString(),
         orderNumber: order.orderNumber,
@@ -270,6 +286,7 @@ module.exports = (io, socket) => {
         await Conversation.findByIdAndUpdate(order.conversation, { stage: "closed" });
       }
 
+      emitContactForOrder(order);
       io.to("employees").emit("order:updated", {
         orderId: order._id.toString(),
         orderNumber: order.orderNumber,

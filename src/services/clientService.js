@@ -60,6 +60,11 @@ const submitProfile = async (clientId, profileData) => {
     client: client.toObject(),
   });
 
+  // Also emit unified contact update
+  try {
+    require("./contactsService").emitContactUpdated(client.phone);
+  } catch (_) { /* noop */ }
+
   logger.info(`Client ${client.phone} submitted profile for approval`);
   return client;
 };
@@ -90,6 +95,10 @@ const approveClient = async (clientId, employeeId) => {
     message: "Your account has been approved! You can now view prices.",
   });
 
+  try {
+    require("./contactsService").emitContactUpdated(client.phone);
+  } catch (_) { /* noop */ }
+
   logger.info(`Client ${client.phone} approved by employee ${employeeId}`);
   return client;
 };
@@ -116,6 +125,10 @@ const rejectClient = async (clientId, employeeId, reason = "") => {
     reason,
     message: "Your account request was not approved. Please update your details and try again.",
   });
+
+  try {
+    require("./contactsService").emitContactUpdated(client.phone);
+  } catch (_) { /* noop */ }
 
   logger.info(`Client ${client.phone} rejected by employee ${employeeId}: ${reason}`);
   return client;
@@ -168,6 +181,143 @@ const getClientById = async (clientId) => {
 };
 
 /**
+ * Admin creates a new client directly from the dashboard.
+ * Auto-creates the matching User row for WhatsApp + order unification.
+ *
+ * @param {object} data { phone, name, firmName, gstNumber, email, city, company, partyName, billName, rateUpdatesConsent, approvalStatus }
+ * @param {string} employeeId
+ */
+const createClientByAdmin = async (data, employeeId) => {
+  const {
+    phone,
+    name = "",
+    firmName = "",
+    gstNumber = "",
+    email = "",
+    city = "",
+    company = "",
+    partyName = "",
+    billName = "",
+    rateUpdatesConsent = true,
+    approvalStatus = "approved", // admin-created clients are approved by default
+  } = data || {};
+
+  if (!phone || String(phone).replace(/[^0-9]/g, "").length < 10) {
+    throw new AppError("Valid phone number is required", 400);
+  }
+  const normalized = String(phone).replace(/[^0-9]/g, "");
+
+  // Prevent duplicates
+  const existing = await Client.findOne({ phone: normalized });
+  if (existing) {
+    throw new AppError("A client with this phone number already exists", 409);
+  }
+
+  const isProfileComplete = !!(name && firmName && email && gstNumber);
+
+  const client = await Client.create({
+    phone: normalized,
+    name,
+    firmName,
+    gstNumber,
+    email,
+    rateUpdatesConsent: !!rateUpdatesConsent,
+    rateUpdatesConsentAt: rateUpdatesConsent ? new Date() : null,
+    isProfileComplete,
+    approvalStatus,
+    approvedBy: approvalStatus === "approved" ? employeeId : null,
+    approvedAt: approvalStatus === "approved" ? new Date() : null,
+  });
+
+  // Sync matching User record (so WhatsApp chats + orders roll up to same phone)
+  const { User } = require("../models");
+  const userUpdate = {};
+  if (name) userUpdate.name = name;
+  if (firmName) userUpdate.firmName = firmName;
+  if (gstNumber) userUpdate.gstNo = gstNumber;
+  if (partyName) userUpdate.partyName = partyName;
+  if (billName) userUpdate.billName = billName;
+  if (city) userUpdate.city = city;
+  if (company) userUpdate.company = company;
+
+  await User.findOneAndUpdate(
+    { $or: [{ phone: normalized }, { waId: normalized }] },
+    {
+      $set: userUpdate,
+      $setOnInsert: { phone: normalized, waId: normalized },
+    },
+    { upsert: true, returnDocument: "after" }
+  );
+
+  // Real-time: broadcast
+  const io = getIO();
+  io.to("employees").emit("client:updated", {
+    client: client.toObject(),
+    action: "created",
+    createdBy: employeeId,
+  });
+
+  try {
+    require("./contactsService").emitContactUpdated(normalized);
+  } catch (_) { /* noop */ }
+
+  logger.info(`Admin created client ${normalized} (status=${approvalStatus})`);
+  return client;
+};
+
+/**
+ * Admin updates an existing client's details.
+ * Mirrors relevant fields back to the linked User record.
+ */
+const updateClientByAdmin = async (clientId, updates, employeeId) => {
+  const client = await Client.findById(clientId);
+  if (!client) throw new AppError("Client not found", 404);
+
+  const allowed = ["name", "firmName", "gstNumber", "email", "rateUpdatesConsent"];
+  for (const key of allowed) {
+    if (updates[key] !== undefined) client[key] = updates[key];
+  }
+  if (updates.rateUpdatesConsent === true && !client.rateUpdatesConsentAt) {
+    client.rateUpdatesConsentAt = new Date();
+  }
+  client.isProfileComplete = !!(client.name && client.firmName && client.email && client.gstNumber);
+
+  await client.save();
+
+  // Mirror to User
+  const { User } = require("../models");
+  const userUpdate = {};
+  if (updates.name !== undefined) userUpdate.name = updates.name;
+  if (updates.firmName !== undefined) userUpdate.firmName = updates.firmName;
+  if (updates.gstNumber !== undefined) userUpdate.gstNo = updates.gstNumber;
+  if (updates.partyName !== undefined) userUpdate.partyName = updates.partyName;
+  if (updates.billName !== undefined) userUpdate.billName = updates.billName;
+  if (updates.city !== undefined) userUpdate.city = updates.city;
+  if (updates.company !== undefined) userUpdate.company = updates.company;
+  if (Object.keys(userUpdate).length > 0) {
+    await User.findOneAndUpdate(
+      { $or: [{ phone: client.phone }, { waId: client.phone }] },
+      { $set: userUpdate, $setOnInsert: { phone: client.phone, waId: client.phone } },
+      { upsert: true }
+    );
+  }
+
+  const io = getIO();
+  io.to("employees").emit("client:updated", {
+    client: client.toObject(),
+    action: "updated",
+    updatedBy: employeeId,
+  });
+
+  try {
+    require("./contactsService").emitContactUpdated(client.phone);
+  } catch (_) { /* noop */ }
+
+  logger.info(`Admin updated client ${client.phone}`);
+  return client;
+};
+
+/**
  * Get counts for the admin dashboard badges.
  */
 const getApprovalCounts = async () => {
@@ -186,6 +336,8 @@ module.exports = {
   submitProfile,
   approveClient,
   rejectClient,
+  createClientByAdmin,
+  updateClientByAdmin,
   getClients,
   getClientById,
   getApprovalCounts,

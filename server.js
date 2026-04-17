@@ -1,3 +1,7 @@
+// Force the entire Node process to run in Indian Standard Time (Asia/Kolkata).
+// This affects logs, new Date().toLocaleString() without explicit tz, etc.
+process.env.TZ = process.env.TZ || "Asia/Kolkata";
+
 const http = require("http");
 
 const env = require("./src/config/env");

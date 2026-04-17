@@ -11,6 +11,7 @@ const productHandler = require("./productHandler");
 const priceHandler = require("./priceHandler");
 const clientApprovalHandler = require("./clientApprovalHandler");
 const contactHandler = require("./contactHandler");
+const contactsHandler = require("./contactsHandler");
 
 // Client-side handler
 const clientHandler = require("./clientHandler");
@@ -60,6 +61,7 @@ const init = (httpServer) => {
     priceHandler(io, socket);
     clientApprovalHandler(io, socket);
     contactHandler(io, socket);
+    contactsHandler(io, socket);
 
     socket.on("disconnect", (reason) => {
       logger.debug(`Employee disconnected: ${socket.employee.name} — ${reason}`);
