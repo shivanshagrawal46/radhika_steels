@@ -75,6 +75,10 @@ const INTENT_HINTS = {
     /(?:^|[\s,.])(?:book\s*kar|pakka\s*kar|confirm\s*kar|le\s*lo|lelo|ले\s*लो|बुक\s*कर|पक्का\s*कर)(?:o|do|iye|va|ो|ा|ें)?(?:$|[\s,.\?])/i,
     /(?:^|[\s,.])(?:order\s*kar|final\s*kar|done\s*kar)(?:o|do|iye)?(?:$|[\s,.\?])/i,
     /(?:^|[\s,.])(?:confirm\s*hai|pakka\s*hai|done\s*hai|book\s*hai)(?:$|[\s,.\?])/i,
+    // Bare confirmation words (standalone, 1–3 word messages):
+    // "order", "confirm", "confirmed", "booked", "pakka", "final", "done",
+    // "order de do", "confirm please", "ok confirm", "book it", etc.
+    /^(?:ok\s+|okay\s+)?(?:order|confirm|confirmed|booked|pakka|final|done|आर्डर|कन्फर्म|पक्का)(?:\s+(?:please|pls|kar\s*do|de\s*do|it|ho|ji))?\s*[.!]?$/i,
   ],
   price_inquiry: [
     /(?:^|[\s,.])(?:rate|rates|price|prices|bhav|भाव|kya\s*rate|क्या\s*रेट|quote|quotation)(?:$|[\s,.\?])/i,
@@ -298,9 +302,13 @@ function parse(text) {
       result.intent = "follow_up";
       result.confidence = 0.5;
     }
+    // "ji / ok / haan / yes / theek hai / accha" are pure acknowledgments.
+    // They must NOT be treated as a re-ask for price. Mark as acknowledgment
+    // so chatService will skip the price-enrichment path. Only the order-flow
+    // handler (Case 2: confirm previously quoted qty) should act on them.
     if (/^(?:ji|haan|ha|haa|ok|okay|yes|theek|thik|sahi|done|acha|accha)\s*(?:ji|hai|h|bhai)?\s*[.!]?$/i.test(c)) {
-      result.intent = "follow_up";
-      result.confidence = 0.5;
+      result.intent = "acknowledgment";
+      result.confidence = 0.9;
     }
   }
 
@@ -314,6 +322,7 @@ function intentToStage(intent) {
     order_confirm: null, // stage set only by processOrderConfirmation after DB save
     order_inquiry: "price_inquiry",
     follow_up: null,
+    acknowledgment: null,
     delivery_inquiry: null,
     greeting: null,
     thanks: null,

@@ -486,20 +486,11 @@ const handleIncomingMessage = async (parsed) => {
       }
     }
 
-    // Case 2: User confirms — "ji", "haan", "ok" — use previously discussed quantity
-    if (parsedIntent.intent === "follow_up" && ctx.quantity && ctx.quantity > 0) {
-      parsedIntent.intent = "order_confirm";
-      parsedIntent.category = ctx.category;
-      parsedIntent.size = ctx.size || null;
-      parsedIntent.gauge = ctx.gauge || null;
-      parsedIntent.mm = ctx.mm || null;
-      parsedIntent.carbonType = ctx.carbonType || "normal";
-      parsedIntent.quantity = ctx.quantity;
-      parsedIntent.unit = ctx.unit || "ton";
-      parsedIntent.confidence = 0.7;
-      logger.info(`[CHAT] L1c Order confirmation: cat=${ctx.category}, qty=${ctx.quantity}`);
-    }
+    // NOTE: Bare "ji" / "ok" / "haan" are NEVER treated as order confirmation.
+    // User must explicitly say "book karo" / "confirm" / "pakka" etc.
+    // Acknowledgments always fall through to the silent-acknowledgment branch below.
   }
+
 
   // Update conversation context
   const suggestedStage = intentParser.intentToStage(parsedIntent.intent);
@@ -540,6 +531,14 @@ const handleIncomingMessage = async (parsed) => {
 
   // 10. Emit to dashboard
   emitToDashboard(io, conversation, incomingMsg, isNewConversation, parsedIntent, displayName);
+
+  // 10a. Pure acknowledgment ("ji", "ok", "haan") that did NOT get upgraded to
+  // order_confirm above → user is just acknowledging. Do NOT re-send prices or
+  // anything else. Stay silent (matches user's "only reply when necessary" rule).
+  if (parsedIntent.intent === "acknowledgment") {
+    logger.info(`[CHAT] ─── END from=${from} — SILENT (acknowledgment: "${(text || "").substring(0, 30)}") ───`);
+    return;
+  }
 
   // 10b. If employee is actively handling this chat, skip AI
   if (isEmployeeLocked(conversation)) {

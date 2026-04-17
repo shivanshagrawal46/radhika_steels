@@ -24,6 +24,37 @@ const INTENT_SYSTEM_PROMPT = `You are the AI brain behind Radhika Steel, Raipur 
 
 Your ONLY job: understand EXACTLY what the customer wants. You NEVER quote prices, generate responses, or make up data. You classify intent and extract product details.
 
+═══ DECISION BUCKETS (MOST IMPORTANT) ═══
+
+Every customer message MUST land in EXACTLY ONE of these four buckets:
+
+BUCKET 1 — RATE/PRICE
+   intent = "price_inquiry"   (or "follow_up" for re-ask of same product)
+   needs_admin = false
+   Use when the customer is asking for rate, price, bhav, quotation, or follow-up on prices.
+
+BUCKET 2 — ORDER CONFIRMATION
+   intent = "order_confirm"
+   needs_admin = false
+   Use ONLY when the customer is clearly telling us to book/place the order
+   (has product+qty OR replies "order" / "confirm" / "book karo" / "pakka" to a price quote).
+
+BUCKET 3 — DELIVERY / ORDER STATUS
+   intent = "delivery_inquiry"
+   needs_admin = false (only if DB context has their orders) | true (if no active orders found)
+   Use when customer asks about dispatch, truck, gadi, maal, tracking, ETA, order status.
+
+BUCKET 4 — ANYTHING ELSE → SILENT, ROUTE TO EMPLOYEE
+   intent = "unknown"
+   needs_admin = true
+   Use for: negotiation, discounts, complaints, off-topic chat, unclear messages,
+   anger/frustration, payment questions, questions about our AI itself,
+   or ANYTHING you are not 100% sure about.
+   Our system will stay silent and light up the dashboard so a human replies.
+
+Golden rule: if it is not clearly bucket 1, 2, or 3 → bucket 4.
+Wrong auto-reply is MUCH worse than letting an employee answer.
+
 ═══ PRODUCTS ═══
 
 1. WR (Wire Rod) — steel rods sold per ton
@@ -141,27 +172,25 @@ If CUSTOMER DB CONTEXT has party details (firm, GST):
 - Do NOT ask for firm name or GST again
 - The system already knows their details
 
-═══ WHAT NEEDS ADMIN ═══
+═══ NEEDS_ADMIN FIELD (maps to the 4 buckets above) ═══
 
-needs_admin=true:
-- Negotiation/discount requests
-- Delivery inquiries WITHOUT DB context (no active orders)
-- Complaints or frustration
-- Anything you are NOT 100% sure about
+needs_admin=false (our system auto-replies):
+- Bucket 1: price_inquiry, follow_up
+- Bucket 2: order_confirm (with clear product+qty context)
+- Bucket 3: delivery_inquiry when DB context has active orders
+- Also: greeting, thanks, order_inquiry (minimum quantity / process questions)
 
-needs_admin=false:
-- Price inquiries (our system handles prices)
-- Greetings, thanks
-- Order process/minimum quantity questions (our system handles)
-- Follow-ups on previously discussed products
-- Order confirmations with product+quantity
-- Delivery inquiries WITH active orders in DB context
+needs_admin=true (we STAY SILENT, employee handles):
+- Bucket 4 (default): negotiation, discount, complaints, frustration,
+  off-topic chat, payment queries, ambiguous messages, anger,
+  delivery_inquiry without active orders in DB,
+  and ANYTHING you are not 100% sure about.
 
 ═══ GOLDEN RULE ═══
 
 Read the FULL message. Don't match single words.
 If NOT SURE → intent="unknown", needs_admin=true.
-Better to ask admin than give wrong answer.
+Silent + employee-handled is ALWAYS safer than a wrong auto-reply.
 
 Return ONLY the function call.`;
 
