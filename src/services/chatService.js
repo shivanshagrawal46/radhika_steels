@@ -68,7 +68,34 @@ function getDisplayName(user, contacts) {
 // ─────────────────────────────────────────────────────
 // ORDER CONFIRMATION HELPER — DB-first, then template
 // ─────────────────────────────────────────────────────
-async function processOrderConfirmation(orderResult, conversation, user, io, from, displayName) {
+// Detect whether the customer actually stated a quantity (tons/mt/etc.)
+// anywhere in their recent messages. Used to catch GPT quantity-hallucination.
+// Examples that match: "3 ton", "5mt", "2 tonne", "2.5 ton", "2 टन", "5MT".
+// Sizes like "8mm" / "10mm" / "5.5 dia" do NOT match — those aren't quantities.
+const QTY_MENTION_REGEX =
+  /\b(\d+(?:\.\d+)?)\s*(?:tons?|tonnes?|t\b|mts?|m\.?t\.?|quintals?|kwintals?|kg|kilo(?:gram)?s?|टन|मेट्रिक|क्विंटल)/i;
+
+function userMentionedQuantity(chatHistory, currentText) {
+  const parts = [currentText || ""];
+  if (Array.isArray(chatHistory)) {
+    for (const m of chatHistory) {
+      if (!m || typeof m.content !== "string") continue;
+      // Count qty mentions from:
+      //   • user's own messages (they said it)
+      //   • any [REPLIED-TO MESSAGE] block (replying = implicitly acknowledging
+      //     the content — even if it was our quote that mentioned "5 ton")
+      const isUser = m.role === "user";
+      const isRepliedTo = m.content.includes("[REPLIED-TO MESSAGE]");
+      if (isUser || isRepliedTo) parts.push(m.content);
+    }
+  }
+  return QTY_MENTION_REGEX.test(parts.join("\n"));
+}
+
+async function processOrderConfirmation(
+  orderResult, conversation, user, io, from, displayName,
+  chatHistory = null, currentText = ""
+) {
   const items = orderResult.items.map((i) => ({
     category: i.category, size: i.size || null, gauge: i.gauge || null,
     mm: i.mm || null,
@@ -76,6 +103,30 @@ async function processOrderConfirmation(orderResult, conversation, user, io, fro
     mmRange: i.mm_range || i.mmRange || null,
     carbonType: i.carbon_type || "normal", quantity: i.quantity || 0,
   }));
+
+  // Guard #1 — any item arrives with no quantity (GPT obeyed our prompt and
+  // returned 0 because the customer never stated tons).
+  // Guard #2 — every item has a quantity but the customer NEVER mentioned
+  // any "N ton" anywhere in their messages → GPT hallucinated the numbers.
+  // Either way we must refuse to create the order and ask for qty per size.
+  // Typical trigger: "Hb 8mm 10mm" → rates → "Book" (no number said).
+  const someQtyMissing = items.some((i) => !i.quantity || i.quantity <= 0);
+  const qtyEverStated = userMentionedQuantity(chatHistory, currentText);
+  const missingQty = someQtyMissing || !qtyEverStated;
+  if (missingQty) {
+    try {
+      conversation.context.lastIntent = "order_confirm";
+      conversation.markModified("context");
+      await conversation.save();
+    } catch (err) {
+      logger.warn(`[ORDER] Could not persist lastIntent: ${err.message}`);
+    }
+    logger.info(
+      `[ORDER] Qty guard fired (missingField=${someQtyMissing}, neverStated=${!qtyEverStated}) ` +
+      `on ${items.length} item(s) — asking customer, no order created`
+    );
+    return responseBuilder.buildQuantityAskForItems(items);
+  }
 
   const totalQty = items.reduce((sum, i) => sum + (i.quantity || 0), 0);
   const belowMin = items.filter((i) => (i.quantity || 0) < responseBuilder.MIN_QTY_PER_ITEM);
@@ -728,7 +779,10 @@ const handleIncomingMessage = async (parsed) => {
         usedGPT = true;
 
         if (orderResult && orderResult.is_order && orderResult.items?.length > 0) {
-          const orderRes = await processOrderConfirmation(orderResult, conversation, user, io, from, displayName);
+          const orderRes = await processOrderConfirmation(
+            orderResult, conversation, user, io, from, displayName,
+            orderChatHistory, text
+          );
           if (orderRes) responseText = orderRes;
         }
 
@@ -747,7 +801,10 @@ const handleIncomingMessage = async (parsed) => {
               quantity: parsedIntent.quantity,
             }],
           };
-          const orderRes = await processOrderConfirmation(fallbackResult, conversation, user, io, from, displayName);
+          const orderRes = await processOrderConfirmation(
+            fallbackResult, conversation, user, io, from, displayName,
+            orderChatHistory, text
+          );
           if (orderRes) responseText = orderRes;
         }
 
@@ -819,7 +876,10 @@ const handleIncomingMessage = async (parsed) => {
             usedGPT = true;
 
             if (orderResult && orderResult.is_order && orderResult.items?.length > 0) {
-              const orderRes = await processOrderConfirmation(orderResult, conversation, user, io, from, displayName);
+              const orderRes = await processOrderConfirmation(
+                orderResult, conversation, user, io, from, displayName,
+                gptOrderHistory, text
+              );
               if (orderRes) responseText = orderRes;
             }
 

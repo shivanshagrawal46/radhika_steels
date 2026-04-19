@@ -413,6 +413,28 @@ QUANTITY RULES:
 - ton = tons = tonne = tonnes = mt = mts = m.t. = metric ton — ALL SAME (1 ton = 1000 kg)
 - "dia" / "diameter" = just means mm size. Determine WR/HB from the value.
 
+⚠️⚠️⚠️ CRITICAL — NEVER FABRICATE QUANTITIES:
+The customer MUST have explicitly said a number of tons IN THE CHAT
+(either in the current message, or in an earlier user message / replied-to
+message during THIS conversation). If no number was stated, set quantity=0
+for that item. DO NOT default to 2, 5, 10, the minimum, or any other value.
+
+- Customer says "hb 8mm 10mm" → we quote rates → customer says "book"
+  → NO quantity was ever stated → quantity=0 for BOTH items
+  (our system will then ask the customer for the quantity per size)
+- "5.5 book karo" (product but no tons anywhere)     → quantity=0
+- "book karo" / "confirm" / "pakka" / "le lo" alone  → still need a number;
+  if none in history → quantity=0 for each item
+- "5.5 3 ton book karo"                              → quantity=3
+- "hb 8mm 3 ton aur 10mm 2 ton book karo"            → 3 for 8mm, 2 for 10mm
+- Replying "book karo" to a price-quote message that showed "5 ton" inside it
+  → quantity=5 (the number WAS stated — in the message they replied to)
+- Replying "book karo" to a price-quote message that showed ONLY rates (no
+  ton number) → quantity=0 — rates in our own message are NOT a quantity
+
+Hallucinating a quantity creates a WRONG order that the customer did not ask
+for — always worse than asking them. When in doubt → quantity=0.
+
 REPLY-TO CONTEXT:
 - Messages prefixed with "[REPLIED-TO MESSAGE]:" are the original message the customer replied to.
 - When customer replies "book karo" / "confirm karo" / "ye le lo" to an old price message,

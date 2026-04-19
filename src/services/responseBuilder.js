@@ -312,6 +312,47 @@ const buildOrderQuantityAsk = (parsedIntent, userText) => {
   return "Ji, kitna ton chahiye aapko?";
 };
 
+// Label used when asking the customer for a per-item quantity. Matches the
+// shorter format used in multi-item price responses (no trailing mm range
+// when the gauge's own mm range is implied).
+const itemShortLabel = (item) => {
+  const lc = item.carbonType === "lc" ? " LC" : "";
+  if (item.category === "wr") {
+    return `WR ${item.size || "5.5"}mm${lc}`;
+  }
+  if (item.category === "hb") {
+    const g = item.gauge || "12";
+    if (item.mmRange || item.mm) {
+      return `HB Wire ${g}g (${item.mmRange || item.mm}mm)${lc}`;
+    }
+    return `HB Wire ${g}g${lc}`;
+  }
+  return `${String(item.category || "").toUpperCase()} ${item.size || item.gauge || ""}`.trim();
+};
+
+/**
+ * Ask the customer for quantities when they've said "book" / "confirm" but
+ * haven't told us how many tons per size. For a single item we send the
+ * short existing ask; for multi-item we list every size so the customer
+ * knows they need to give a quantity for each.
+ */
+const buildQuantityAskForItems = (items, userText = "") => {
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+  if (list.length <= 1) {
+    const single = list[0];
+    const parsedIntent = single ? { category: single.category } : {};
+    return buildOrderQuantityAsk(parsedIntent, userText);
+  }
+
+  let msg = `${BRAND}\n\nOrder book karne ke liye har size ke liye kitna ton chahiye, ye bataiye:\n`;
+  for (const it of list) {
+    msg += `\n▸ *${itemShortLabel(it)}* — ? ton`;
+  }
+  msg += `\n\n_Example: "8mm 3 ton, 10mm 2 ton book karo"_`;
+  msg += `\n_Minimum ${MIN_QTY_PER_ITEM} ton per size, total ${MIN_QTY_TOTAL} ton._`;
+  return msg;
+};
+
 // ──────────────────────────────────────────────
 // Delivery Info Response (from DB)
 // ──────────────────────────────────────────────
@@ -438,6 +479,7 @@ module.exports = {
   buildOrderPaymentSummary,
   buildMinQtyError,
   buildOrderQuantityAsk,
+  buildQuantityAskForItems,
   buildGreeting,
   buildDeliveryResponse,
   buildFromIntent,

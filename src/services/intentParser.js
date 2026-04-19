@@ -78,7 +78,7 @@ const INTENT_HINTS = {
     // Bare confirmation words (standalone, 1–3 word messages):
     // "order", "confirm", "confirmed", "booked", "pakka", "final", "done",
     // "order de do", "confirm please", "ok confirm", "book it", etc.
-    /^(?:ok\s+|okay\s+)?(?:order|confirm|confirmed|booked|pakka|final|done|आर्डर|कन्फर्म|पक्का)(?:\s+(?:please|pls|kar\s*do|de\s*do|it|ho|ji))?\s*[.!]?$/i,
+    /^(?:ok\s+|okay\s+)?(?:order|confirm|confirmed|book|booked|pakka|final|done|आर्डर|कन्फर्म|पक्का|बुक)(?:\s+(?:please|pls|kar\s*do|de\s*do|it|ho|ji|karo|kardo))?\s*[.!]?$/i,
   ],
   price_inquiry: [
     /(?:^|[\s,.])(?:rate|rates|price|prices|bhav|भाव|kya\s*rate|क्या\s*रेट|quote|quotation)(?:$|[\s,.\?])/i,
