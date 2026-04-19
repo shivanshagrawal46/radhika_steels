@@ -56,7 +56,8 @@ const buildMmSubRanges = (mmRange) => {
 // ──────────────────────────────────────────────
 const buildHBLabel = (price, userMmRange) => {
   if (userMmRange && price && price.gauge) {
-    return `HB Wire ${price.gauge}g (${userMmRange}mm)`;
+    const lc = price.carbonType === "lc" ? " LC" : "";
+    return `HB Wire ${price.gauge}g (${userMmRange}mm)${lc}`;
   }
   return price ? price.label : "HB Wire";
 };
@@ -136,7 +137,7 @@ const buildMultiPriceResponse = (prices, quantities, userMmRanges = []) => {
     const userRange = userMmRanges[i] || null;
     // Use user's range for HB when provided, else short label
     const label = (userRange && p && p.gauge)
-      ? `HB Wire ${p.gauge}g (${userRange}mm)`
+      ? `HB Wire ${p.gauge}g (${userRange}mm)${p.carbonType === "lc" ? " LC" : ""}`
       : shortLabel(p.label);
     msg += `\n\n▸ *${label}*`;
     msg += `\n${INR(p.mergedBase)} + ${INR(p.fixedCharge)} + ${p.gstPercent}% GST = *${INR(p.total)}/ton*`;
@@ -167,7 +168,8 @@ const ADVANCE_AMOUNT = 50000;
 // range for HB wire when provided.
 const buildItemLabel = (item, price) => {
   if (item.category === "hb" && item.mmRange && price && price.gauge) {
-    return `HB Wire ${price.gauge}g (${item.mmRange}mm)`;
+    const lc = (item.carbonType === "lc" || price.carbonType === "lc") ? " LC" : "";
+    return `HB Wire ${price.gauge}g (${item.mmRange}mm)${lc}`;
   }
   return shortLabel(price ? price.label : "");
 };
@@ -199,10 +201,11 @@ const buildOrderConfirmation = async (items, opts = {}) => {
           carbonType: item.carbonType || "normal",
         });
       } else if (item.category === "hb") {
+        const hbCarbon = item.carbonType || "normal";
         if (item.mm) {
-          price = await pricingService.calculatePrice("hb", { mm: item.mm });
+          price = await pricingService.calculatePrice("hb", { mm: item.mm, carbonType: hbCarbon });
         } else {
-          price = await pricingService.calculatePrice("hb", { gauge: item.gauge || "12" });
+          price = await pricingService.calculatePrice("hb", { gauge: item.gauge || "12", carbonType: hbCarbon });
         }
       }
     } catch (err) {
@@ -400,13 +403,14 @@ const buildFromIntent = async (parsedIntent) => {
     if (category === "hb") {
       let price;
       let askForMm = false;
+      const hbCarbon = carbonType || "normal";
       if (mm) {
-        price = await pricingService.calculatePrice("hb", { mm });
+        price = await pricingService.calculatePrice("hb", { mm, carbonType: hbCarbon });
       } else if (gauge) {
-        price = await pricingService.calculatePrice("hb", { gauge });
+        price = await pricingService.calculatePrice("hb", { gauge, carbonType: hbCarbon });
         askForMm = true;
       } else {
-        price = await pricingService.calculatePrice("hb", { gauge: "12" });
+        price = await pricingService.calculatePrice("hb", { gauge: "12", carbonType: hbCarbon });
         askForMm = true;
       }
       return { text: buildHBResponse(price, quantity, askForMm, mmRange), usedGPT: false };

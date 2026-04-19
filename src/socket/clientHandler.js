@@ -105,11 +105,12 @@ module.exports = (clientNsp, socket) => {
         });
       }
 
-      const { category, size, carbonType, gauge } = payload;
+      const { category, size, carbonType, gauge, mm } = payload;
       const result = await pricingService.calculatePrice(category, {
         size,
         carbonType,
         gauge,
+        mm,
       });
       callback({ success: true, data: result });
     } catch (err) {

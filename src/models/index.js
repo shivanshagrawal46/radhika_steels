@@ -10,6 +10,7 @@ const Order = require("./Order");
 const Notification = require("./Notification");
 const Contact = require("./Contact");
 const Otp = require("./Otp");
+const RateSubscriber = require("./RateSubscriber");
 
 module.exports = {
   User,
@@ -24,4 +25,5 @@ module.exports = {
   Notification,
   Contact,
   Otp,
+  RateSubscriber,
 };

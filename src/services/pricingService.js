@@ -135,16 +135,20 @@ const calcWR = (rate, size, carbonType = "normal") => {
 
 // ──────────────────────────────────────────────
 // HB Price Calculation
+//
+// carbonType = "normal" | "lc". HB shares the same carbonExtras table as WR
+// (normal = 0, lc = +₹800). Any other value → treated as normal.
 // ──────────────────────────────────────────────
-const calcHB = (rate, gauge = "12") => {
+const calcHB = (rate, gauge = "12", carbonType = "normal") => {
   const gaugePremium = lookup(rate.hbGaugePremiums, gauge);
   if (gaugePremium === undefined || gaugePremium === null) {
     throw new AppError(`HB Wire ${gauge}g is not available`, 400);
   }
+  const carbonExtra = lookup(rate.carbonExtras, carbonType) ?? 0;
   const { wrBaseRate, hbPremium, fixedCharge, gstPercent } = rate;
 
   const hbBase = wrBaseRate + hbPremium;
-  const mergedBase = hbBase + gaugePremium;
+  const mergedBase = hbBase + gaugePremium + carbonExtra;
   const subtotal = mergedBase + fixedCharge;
   const gst = Math.round((subtotal * gstPercent) / 100);
   const total = subtotal + gst;
@@ -156,6 +160,7 @@ const calcHB = (rate, gauge = "12") => {
     category: "hb",
     gauge,
     mmRange,
+    carbonType,
     unit: "ton",
     mergedBase,
     fixedCharge,
@@ -163,17 +168,17 @@ const calcHB = (rate, gauge = "12") => {
     subtotal,
     gst,
     total,
-    label: `HB Wire ${gauge}g${mmLabel}`,
+    label: `HB Wire ${gauge}g${mmLabel}${carbonType === "lc" ? " LC" : ""}`,
   };
 };
 
 // ──────────────────────────────────────────────
 // HB Price by MM size (user says "5.3mm" → find gauge → calculate)
 // ──────────────────────────────────────────────
-const calcHBByMm = (rate, mm) => {
+const calcHBByMm = (rate, mm, carbonType = "normal") => {
   const row = mmToGauge(mm);
   if (!row) throw new AppError(`Cannot find gauge for ${mm}mm`, 400);
-  return calcHB(rate, row.gauge);
+  return calcHB(rate, row.gauge, carbonType);
 };
 
 // ──────────────────────────────────────────────
@@ -185,8 +190,9 @@ const calculatePrice = async (category, options = {}) => {
     return calcWR(rate, options.size || "5.5", options.carbonType || "normal");
   }
   if (category === "hb") {
-    if (options.mm) return calcHBByMm(rate, options.mm);
-    return calcHB(rate, options.gauge || "12");
+    const carbonType = options.carbonType || "normal";
+    if (options.mm) return calcHBByMm(rate, options.mm, carbonType);
+    return calcHB(rate, options.gauge || "12", carbonType);
   }
   throw new AppError(`Pricing not configured for: ${category}`, 400);
 };
@@ -205,9 +211,13 @@ const getFullPriceTable = async () => {
     }
   }
 
+  // HB × carbonTypes — normal entries come first (preserves existing
+  // `.find(p => p.gauge === "12")` callers picking the normal variant).
   const hb = [];
   for (const g of ALL_HB_GAUGES) {
-    try { hb.push(calcHB(rate, g)); } catch { /* skip unconfigured */ }
+    for (const ct of carbonTypes) {
+      try { hb.push(calcHB(rate, g, ct)); } catch { /* skip unconfigured */ }
+    }
   }
 
   return { wrBaseRate: rate.wrBaseRate, updatedAt: rate.updatedAt, wr, hb };

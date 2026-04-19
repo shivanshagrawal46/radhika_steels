@@ -215,14 +215,19 @@ function parse(text) {
     }
   }
 
-  // 6. Detect single mm/dia: "5.3mm", "5.3 dia" — routes to HB if in HB range
-  // Skip values that look like WR sizes (whole numbers or 5.5 in the 3-30 range)
+  // 6. Detect single mm/dia: "5.3mm", "5.3 dia" — routes to HB if in HB range.
+  // Normally we skip values that look like WR sizes (whole numbers or 5.5 in
+  // the 3-30 range) so "5.5 dia" stays WR. BUT if the user explicitly said
+  // "hb" / "hb wire", then 8mm, 10mm etc. are HB (the user told us so).
   if (!result.mm && !result.gauge) {
     const mmSingle = MM_SINGLE_REGEX.exec(lower);
     if (mmSingle) {
       const mmVal = parseFloat(mmSingle[1]);
       const looksLikeWR = isWRSize(mmVal) && (Number.isInteger(mmVal) || mmSingle[1] === "5.5");
-      if (isHBMmRange(mmVal) && !AVAILABLE_WR_SIZES.includes(mmSingle[1]) && !looksLikeWR) {
+      const hbExplicit = result.category === "hb";
+      const isHb = isHBMmRange(mmVal) &&
+        (hbExplicit || (!AVAILABLE_WR_SIZES.includes(mmSingle[1]) && !looksLikeWR));
+      if (isHb) {
         result.mm = mmSingle[1];
         result.gauge = mmToGauge(mmVal);
         result.mmRange = mmSingle[1]; // single exact value the user gave
@@ -278,6 +283,24 @@ function parse(text) {
           }
         }
       }
+    }
+  }
+
+  // 8b. HB coercion for explicit "hb" keyword with WR-looking mm/size.
+  // If the user wrote "hb 8mm" / "hb 10mm" / "hb 8" (bare number) and the
+  // value we captured is in the HB mm range (1.5–12.0mm), treat it as HB mm
+  // and map to the right gauge — the user explicitly said "hb" so we should
+  // NOT serve a WR 8mm price for it. Out-of-range values (12+) are left
+  // untouched (HB physical range ends at 11.8mm).
+  if (result.category === "hb" && result.size && !result.gauge && !result.mm) {
+    const mmVal = parseFloat(result.size);
+    if (isHBMmRange(mmVal)) {
+      result.mm = result.size;
+      result.gauge = mmToGauge(mmVal);
+      result.mmRange = result.size;
+      result.size = null;
+      result.sizeAvailable = true;
+      result.closestSizes = [];
     }
   }
 
@@ -338,23 +361,85 @@ function intentToStage(intent) {
   return map[intent] || null;
 }
 
+// Global variant of MM_SINGLE_REGEX — extracts EVERY mm/dia value in the text.
+// Used to detect inline multi-HB messages like "hb 8mm 10mm" or
+// "8mm 10mm hb wire" where one line carries multiple HB sizes.
+const MM_ALL_REGEX = /(\d+(?:\.\d+)?)\s*(?:mm|dia|diameter|मिमी)/gi;
+
+function extractAllHbMms(text) {
+  if (!text || typeof text !== "string") return [];
+  const re = new RegExp(MM_ALL_REGEX.source, "gi");
+  const seen = new Set();
+  const out = [];
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const raw = m[1];
+    const v = parseFloat(raw);
+    if (!isHBMmRange(v)) continue;
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    out.push(raw);
+  }
+  return out;
+}
+
 /**
- * Parse a message that may contain multiple product inquiries (one per line).
+ * Parse a message that may contain multiple product inquiries.
+ *
+ * Two shapes are supported:
+ *   1. Multi-line: one inquiry per line (e.g. "hb 12g\nwr 5.5").
+ *   2. Inline multi-HB: single line with the "hb" keyword and 2+ mm values
+ *      (e.g. "hb 8mm 10mm", "8mm 10mm hb wire"). Each mm maps to its gauge
+ *      so the multi-item response shows one price per size the user asked for.
+ *
  * Returns an array of parsed items (length >= 2) or empty array.
  */
 function parseMultiple(text) {
   if (!text || typeof text !== "string") return [];
   const lines = text.split(/[\n\r]+/).map((l) => l.trim()).filter((l) => l.length > 0);
-  if (lines.length < 2) return [];
 
-  const items = [];
-  for (const line of lines) {
-    const parsed = parse(line);
-    if (parsed.category && (parsed.size || parsed.gauge || parsed.mm)) {
-      items.push(parsed);
+  // Shape 1: multi-line
+  if (lines.length >= 2) {
+    const items = [];
+    for (const line of lines) {
+      const parsed = parse(line);
+      if (parsed.category && (parsed.size || parsed.gauge || parsed.mm)) {
+        items.push(parsed);
+      }
+    }
+    if (items.length >= 2) return items;
+  }
+
+  // Shape 2: inline multi-HB — user gave 2+ mm values together with "hb"
+  // keyword on a single line. We emit one item per mm so chatService's
+  // existing multi-item path renders all requested sizes. Quantity is left
+  // empty per item because "hb 8mm 10mm 5 ton" is ambiguous (total vs split),
+  // so we only show rates — user can follow up with per-size qty.
+  const single = parse(text);
+  if (single.category === "hb") {
+    const mms = extractAllHbMms(text);
+    if (mms.length >= 2) {
+      return mms.map((mm) => {
+        const v = parseFloat(mm);
+        return {
+          ...single,
+          intent: "price_inquiry",
+          size: null,
+          gauge: mmToGauge(v),
+          mm,
+          mmRange: mm,
+          sizeAvailable: true,
+          closestSizes: [],
+          quantity: null,
+          unit: null,
+          // carbonType is inherited from `single` — so "hb 8mm 10mm lc" gives
+          // both sizes as LC, matching user's intent.
+        };
+      });
     }
   }
-  return items.length >= 2 ? items : [];
+
+  return [];
 }
 
 module.exports = {

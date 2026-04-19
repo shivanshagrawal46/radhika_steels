@@ -43,11 +43,42 @@ const istDateKey = (d) => {
   } catch { return ""; }
 };
 
+// "17th April, 2026" — ordinal IST date for user-facing templates
+const MONTHS = ["January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"];
+
+const ordinalSuffix = (day) => {
+  const n = Number(day);
+  if (n % 100 >= 11 && n % 100 <= 13) return "th";
+  switch (n % 10) {
+    case 1: return "st";
+    case 2: return "nd";
+    case 3: return "rd";
+    default: return "th";
+  }
+};
+
+const formatIstDateOrdinal = (d = new Date()) => {
+  try {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: IST_TZ,
+      day: "numeric",
+      month: "numeric",
+      year: "numeric",
+    }).formatToParts(new Date(d));
+    const lookup = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+    const day = parseInt(lookup.day, 10);
+    const month = MONTHS[parseInt(lookup.month, 10) - 1];
+    return `${day}${ordinalSuffix(day)} ${month}, ${lookup.year}`;
+  } catch { return ""; }
+};
+
 module.exports = {
   IST_TZ,
   IST_LOCALE,
   formatIstDate,
   formatIstTime,
   formatIstDateTime,
+  formatIstDateOrdinal,
   istDateKey,
 };

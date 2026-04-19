@@ -93,9 +93,10 @@ async function processOrderConfirmation(orderResult, conversation, user, io, fro
       if (item.category === "wr") {
         price = await pricingService.calculatePrice("wr", { size: item.size || "5.5", carbonType: item.carbonType });
       } else if (item.category === "hb") {
+        const hbCarbon = item.carbonType || "normal";
         price = item.mm
-          ? await pricingService.calculatePrice("hb", { mm: item.mm })
-          : await pricingService.calculatePrice("hb", { gauge: item.gauge || "12" });
+          ? await pricingService.calculatePrice("hb", { mm: item.mm, carbonType: hbCarbon })
+          : await pricingService.calculatePrice("hb", { gauge: item.gauge || "12", carbonType: hbCarbon });
       }
     } catch (err) {
       logger.warn(`[ORDER] Price calc failed: ${err.message}`);
@@ -598,9 +599,10 @@ const handleIncomingMessage = async (parsed) => {
         if (item.category === "wr") {
           price = await pricingService.calculatePrice("wr", { size: item.size || "5.5", carbonType: item.carbonType });
         } else if (item.category === "hb") {
+          const hbCarbon = item.carbonType || "normal";
           price = item.mm
-            ? await pricingService.calculatePrice("hb", { mm: item.mm })
-            : await pricingService.calculatePrice("hb", { gauge: item.gauge || "12" });
+            ? await pricingService.calculatePrice("hb", { mm: item.mm, carbonType: hbCarbon })
+            : await pricingService.calculatePrice("hb", { gauge: item.gauge || "12", carbonType: hbCarbon });
         }
         if (price) {
           prices.push(price);

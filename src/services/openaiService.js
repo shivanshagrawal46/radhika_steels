@@ -68,6 +68,7 @@ Wrong auto-reply is MUCH worse than letting an employee answer.
    Measured in GAUGE (SWG standard): 1g to 14g, plus 1/0, 2/0, 3/0, 4/0, 5/0, 6/0
    Also specified in MM: 1.6mm to 11.8mm (each mm range maps to a gauge)
    Base gauges: 6g to 12g (cheapest). 13g, 14g cost more. Thicker gauges (5g down, 1/0 to 6/0) also cost more.
+   Carbon types: Normal (default), LC (Low Carbon — costs ₹800 more, same as WR LC)
    If user says "hb rate" without gauge → assume 12g (base gauge)
    
    HB mm-to-gauge mapping examples:
@@ -76,6 +77,9 @@ Wrong auto-reply is MUCH worse than letting an employee answer.
    
    When user says mm size in HB range (1.6mm to 11.8mm), that's HB not WR.
    Examples: "5.3 se 5.4mm" → HB 5g | "6.8 mm" → HB 2g | "9.5mm" → HB 4/0
+   
+   LC works for HB too: "hb lc" / "hb 12g lc" / "5.3 mm lc" / "hb 5g low carbon"
+   → category="hb", carbon_type="lc".
 
 ═══ LANGUAGE — Hindi/Hinglish/English ═══
 
@@ -85,10 +89,21 @@ Steel traders speak mixed Hindi-English. Read the FULL sentence before deciding.
 ton = tons = tonne = tonnes = mt = mts = m.t. = metric ton = metric tons
 Example: "5.5 10 mts" = "5.5 10 mt" = "5.5 10 ton" → WR 5.5mm 10 tons
 "dia" / "diameter" just means mm size. It is NOT category-specific.
-Determine category from the actual mm value:
-- If mm is an available WR size (5.5, 7, 8, 10, 12, 14, 16, 18) → WR
-- If mm is in HB range (1.6-11.8) and NOT a WR size → HB
+Determine category from the actual mm value AND any keywords the user used:
+- If the user wrote "hb" / "hb wire" / "एचबी" ANYWHERE in the message → HB wire,
+  even when the mm value (8, 10, etc.) also happens to be a valid WR size.
+  Examples: "hb 8mm" → HB 1/0 (7.8-8.6mm range) | "hb 10mm" → HB 4/0 (9.8-10.4mm)
+- Otherwise, if mm is an available WR size (5.5, 7, 8, 10, 12, 14, 16, 18) → WR
+- Otherwise, if mm is in HB range (1.6-11.8) and NOT a WR size → HB
 Example: "5.5 dia" = 5.5mm → WR | "5.3 dia" = 5.3mm → HB (5g range) | "8 dia" = 8mm → WR
+         "hb 8mm" → HB 1/0 | "hb 10 dia" → HB 4/0 (the "hb" keyword wins)
+
+MULTI-SIZE HB MESSAGES:
+If the user gives 2+ mm sizes in the SAME message together with "hb" / "hb wire"
+(e.g. "hb 8mm 10mm", "8mm 10mm hb wire", "hb 5.3mm 6.8mm"), they want a price
+for EACH size. Treat it as a multi-item HB inquiry — one entry per mm size,
+each mapped to its own gauge. Do NOT pick just one. Our system will reply with
+all requested sizes in a single response.
 
 PRICE INQUIRY examples:
 - "5.5 wr" / "5.5" / "5.5 rate" → WR 5.5mm price
@@ -102,6 +117,11 @@ PRICE INQUIRY examples:
 - "12g" / "12 gauge" → HB 12g
 - "3/0" / "3/0g" → HB 3/0 gauge
 - "5.3 se 5.4mm" → HB wire in that mm range
+- "hb 8mm" / "hb 8 mm" / "8mm hb wire" → HB 1/0 (7.8-8.6mm range)
+- "hb 10mm" / "10mm hb wire" → HB 4/0 (9.8-10.4mm range)
+- "hb 8mm 10mm" / "8mm 10mm hb wire" / "hb wire 8mm aur 10mm" → MULTI-ITEM HB (two sizes: 8mm=1/0 + 10mm=4/0)
+- "hb lc" / "hb 12g lc" / "5.3 mm lc" / "5.3 se 5.4 mm lc" → HB wire LC (low carbon)
+- "hb 8mm 10mm lc" → MULTI-ITEM HB, both sizes LC (low carbon)
 - "rate" / "bhav" / "aaj ka rate" → general price inquiry
 - "LC mein kya rate hai" → LC price for previously discussed product
 - "?" / "." / "haan" as reply → follow_up (same product)
@@ -384,7 +404,7 @@ When in doubt, is_order=false. Wrong orders are MUCH worse than missed orders.
 
 PRODUCTS:
 - WR (Wire Rod): sizes 5.5mm, 7mm, 8mm, 10mm, 12mm, 14mm, 16mm, 18mm. Carbon: normal or lc (low carbon).
-- HB Wire: gauges 1g-14g, 1/0-6/0. Specified in mm ranges like "5.3 se 5.4mm".
+- HB Wire: gauges 1g-14g, 1/0-6/0. Specified in mm ranges like "5.3 se 5.4mm". Carbon: normal or lc (low carbon — same ₹800 extra as WR).
 
 QUANTITY RULES:
 - Each item minimum: 2 tons
@@ -409,6 +429,13 @@ LANGUAGE: Hindi/Hinglish/English mixed. Examples:
 - "le lo 10 ton 5.5" = WR 5.5mm 10 ton confirmed
 - "5.5 dia 5 mts book karo" = 5.5mm (WR size) 5 ton confirmed
 - "8 dia 3 mts aur hb 12g 2 mts le lo" = WR 8mm 3 ton + HB 12g 2 ton confirmed
+- "hb 12g lc 3 ton book karo" = HB 12g LC, 3 ton (carbon_type="lc")
+- "5.3 se 5.4 mm lc 2 ton book karo" = HB 5g LC, 2 ton (gauge="5", mm_range="5.3-5.4", carbon_type="lc")
+- "hb 8mm 3 ton book karo" = HB 1/0 (7.8-8.6mm), 3 ton (gauge="1/0", mm="8", mm_range="8")
+- "hb 8mm 3 ton aur 10mm 2 ton book karo" = TWO HB items:
+    (1) HB 1/0 (gauge="1/0", mm="8", mm_range="8"), 3 ton
+    (2) HB 4/0 (gauge="4/0", mm="10", mm_range="10"), 2 ton
+  Extract BOTH items — user wants both sizes booked.
 - User replies "ye confirm karo" to old message showing "WR 12mm 5 ton" = WR 12mm 5 ton confirmed
 - User replies "book karo" to old price quote = order those exact items
 
