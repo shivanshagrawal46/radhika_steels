@@ -637,9 +637,50 @@ const handleIncomingMessage = async (parsed) => {
   let aiUsage = { totalTokens: 0 };
   let responseTimeMs = 0;
 
-  // ─── MULTI-ITEM: multiple sizes in one message (or from replied-to message) ───
+  // ─── MULTI-ITEM detection (one message may carry multiple sizes) ───
   const multiItems = parsedIntent._replyMultiItems || intentParser.parseMultiple(text);
-  if (multiItems.length >= 2) {
+
+  // ─── ORDER-ROUTING (Rule 1 + Rule 2) ──────────────────────────────────
+  //
+  // Rule 1 — Current message has an order keyword (book / confirm / pakka /
+  //          le lo / …) AND carries product or quantity info (from parser or
+  //          from parseMultiple). We don't trust the parser's category for
+  //          such messages — the customer may be continuing an earlier HB
+  //          quote with sizes that also happen to be valid WR (e.g. 8mm,
+  //          10mm). Route through GPT verifyOrder with the 7-msg chat
+  //          history so it picks the right items from context.
+  //
+  // Rule 2 — Current message has product / quantity info and NO order
+  //          keyword, BUT the immediately previous user turn was an order
+  //          intent (e.g. they said "book", we asked "kitna ton per size",
+  //          now they're replying with the quantities). Same routing.
+  //
+  // We skip the promotion if the user is clearly asking for a new RATE now
+  // (has rate / price / bhav keyword without a book keyword) — that's a
+  // fresh inquiry, not an order continuation.
+  const textHasOrderKeyword = intentParser.ORDER_KEYWORD_REGEX.test(text || "");
+  const textHasPriceKeyword = /\b(?:rate|rates|price|prices|bhav|भाव|quote|quotation|kya\s*rate|क्या\s*रेट)\b/i.test(text || "");
+  const prevTurnWasOrder = lastWasOrder === true;
+  const hasSizeOrQtySignal = Boolean(
+    parsedIntent.category || parsedIntent.size || parsedIntent.gauge ||
+    parsedIntent.mm || parsedIntent.quantity || multiItems.length >= 2
+  );
+  const forceOrderFlow = hasSizeOrQtySignal && (
+    textHasOrderKeyword || (prevTurnWasOrder && !textHasPriceKeyword)
+  );
+  if (forceOrderFlow && parsedIntent.intent !== "order_confirm") {
+    logger.info(
+      `[CHAT] Route→order (order-kw=${textHasOrderKeyword}, prev-order=${prevTurnWasOrder}, ` +
+      `multiItems=${multiItems.length}, qty=${parsedIntent.quantity || 0}, cat=${parsedIntent.category || "-"})`
+    );
+    parsedIntent.intent = "order_confirm";
+    parsedIntent.confidence = 0.7; // keep below Layer-2 threshold so L3 verifyOrder handles it
+  }
+
+  // ─── MULTI-ITEM: multiple sizes in one message — but only for PRICE INQUIRIES.
+  // If the message is an order (Rule 1/2 above), skip the price response and
+  // let L3 verifyOrder read the chat history to resolve category + items.
+  if (!forceOrderFlow && parsedIntent.intent !== "order_confirm" && multiItems.length >= 2) {
     logger.info(`[CHAT] Multi-item detected: ${multiItems.length} items`);
     const prices = [];
     const quantities = [];

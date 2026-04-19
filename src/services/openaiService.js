@@ -435,6 +435,44 @@ for that item. DO NOT default to 2, 5, 10, the minimum, or any other value.
 Hallucinating a quantity creates a WRONG order that the customer did not ask
 for — always worse than asking them. When in doubt → quantity=0.
 
+MULTI-ITEM QTY FOLLOW-UP (per-size quantity reply) — CATEGORY AGNOSTIC:
+If our PREVIOUS assistant message asked the customer for a per-size quantity
+(e.g. "Order book karne ke liye har size ke liye kitna ton chahiye…" followed
+by a list of items) and the customer replies with one or more numbers, map
+the numbers to the PENDING ITEMS IN THE EXACT ORDER WE LISTED THEM.
+
+This rule works for ANY category — WR, HB, or a mix. The pending items' full
+product details (category / gauge / mm / carbon_type) come from OUR prior
+listing; the customer's short qty reply won't repeat them but they're still
+ordering THOSE items. Do NOT switch category based on the reply alone.
+
+Quantity-reply patterns that ALL mean "is_order=true, use these qtys for the
+pending items, in order":
+- "2 ton aur 5 mt"  /  "2 ton and 5 mt"  /  "2 aur 5 ton"  /  "2, 5 ton"
+    → 1st pending item = 2 tons, 2nd pending item = 5 tons
+- "5.5mm 2 ton, 7mm 5 ton"  /  "8mm 3t 10mm 2t"
+    → explicit per-size mapping, use exactly as stated
+- "3 ton each"  /  "dono 3 ton"  /  "sab 2 ton"
+    → every pending item gets that quantity
+- If customer gives only ONE number and 2+ items are pending → ambiguous;
+  set is_order=false so we re-ask. Do NOT split or duplicate blindly.
+
+Worked examples:
+  Prior list = HB 1/0(8mm) + HB 4/0(10mm):
+    "2 ton and 5 mt"             → HB 1/0 2 ton + HB 4/0 5 ton
+    "8mm 2mt aur 10mm 5mt"       → HB 1/0 2 ton + HB 4/0 5 ton
+  Prior list = WR 5.5mm + WR 7mm:
+    "2 ton and 5 mt"             → WR 5.5mm 2 ton + WR 7mm 5 ton
+    "5.5mm 2mt aur 7mm 5mt"      → WR 5.5mm 2 ton + WR 7mm 5 ton
+    "5.5 2 ton, 7 5 ton"         → WR 5.5mm 2 ton + WR 7mm 5 ton
+  Prior list = WR 8mm + WR 10mm (user asked WR 8mm/10mm earlier):
+    "8mm 2mt aur 10mm 5mt"       → WR 8mm 2 ton + WR 10mm 5 ton
+                                   (DO NOT coerce to HB — prior was WR)
+  Prior list mixed = WR 5.5mm + HB 1/0(8mm):
+    "2 ton aur 3 ton"            → WR 5.5mm 2 ton + HB 1/0 3 ton
+
+"mt" / "mts" / "m.t." ALL mean tons (metric tons) — never millimetres.
+
 REPLY-TO CONTEXT:
 - Messages prefixed with "[REPLIED-TO MESSAGE]:" are the original message the customer replied to.
 - When customer replies "book karo" / "confirm karo" / "ye le lo" to an old price message,
@@ -460,6 +498,24 @@ LANGUAGE: Hindi/Hinglish/English mixed. Examples:
   Extract BOTH items — user wants both sizes booked.
 - User replies "ye confirm karo" to old message showing "WR 12mm 5 ton" = WR 12mm 5 ton confirmed
 - User replies "book karo" to old price quote = order those exact items
+- After we asked "kitna ton per size" for HB 1/0(8mm) + HB 4/0(10mm):
+  - "2 ton and 5 mt"  = HB 1/0 2 ton + HB 4/0 5 ton (mt = tons, not mm!)
+  - "2 aur 5 ton"     = HB 1/0 2 ton + HB 4/0 5 ton
+  - "3 ton each"      = HB 1/0 3 ton + HB 4/0 3 ton
+  - "2 ton"    (only one number, 2 items pending) = is_order=false (ambiguous)
+- Fresh multi-item order with per-size qty — use CHAT HISTORY to pick category:
+  - "book 8mm 2mt aur 10mm 5mt" with NO prior HB context in history
+    → TWO WR items: WR 8mm 2 ton + WR 10mm 5 ton (default WR for those sizes)
+  - "book 8mm 2mt aur 10mm 5mt" when we JUST quoted HB 8mm + HB 10mm
+    → TWO HB items: HB 1/0 (8mm) 2 ton + HB 4/0 (10mm) 5 ton
+      (user is ordering the HB sizes we just quoted — chat history wins over
+       the "WR default for whole-mm value" rule)
+  - "8mm 2mt aur 10mm 5mt" (NO "book" keyword) right after we asked qty per
+    size → is_order=true, take CATEGORY from the items we just listed:
+      • prior list HB 1/0 + HB 4/0 → HB 1/0 2 ton + HB 4/0 5 ton
+      • prior list WR 8mm + WR 10mm → WR 8mm 2 ton + WR 10mm 5 ton
+  - "5.5mm 2mt aur 7mm 5mt" (NO "book" keyword) right after we asked qty per
+    size for WR 5.5mm + WR 7mm → WR 5.5mm 2 ton + WR 7mm 5 ton, is_order=true
 
 ⚠️ HB MM RANGE — CRITICAL:
 Whenever the customer specifies an HB wire mm size or range (e.g. "5.2 se 5.3",

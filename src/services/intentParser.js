@@ -236,15 +236,25 @@ function parse(text) {
     }
   }
 
-  // 7. Quantity + unit
-  const qtyMatch = QTY_REGEX.exec(lower);
-  if (qtyMatch) {
-    result.quantity = parseFloat(qtyMatch[1]);
-    const unitRaw = qtyMatch[0].replace(qtyMatch[1], "").trim().toLowerCase();
-    for (const [key, val] of Object.entries(UNIT_MAP)) {
-      if (unitRaw.includes(key)) { result.unit = val; break; }
+  // 7. Quantity + unit.
+  // We scan GLOBALLY so every number followed by a unit keyword (ton/mt/kg/…)
+  // is recognised as a quantity — not just the first one. This matters when
+  // the customer gives a per-item quantity reply like "2 ton and 5 mt" after
+  // we asked for qty per size; without this, the second number ("5" in "5mt")
+  // leaks into step 8 and gets mistaken for a WR size (5mm → "not available").
+  const qtyBoundValues = new Set();
+  const qtyGlobalRe = new RegExp(QTY_REGEX.source, "gi");
+  let qMatch;
+  while ((qMatch = qtyGlobalRe.exec(lower)) !== null) {
+    qtyBoundValues.add(qMatch[1]);
+    if (result.quantity === null) {
+      result.quantity = parseFloat(qMatch[1]);
+      const unitRaw = qMatch[0].replace(qMatch[1], "").trim().toLowerCase();
+      for (const [key, val] of Object.entries(UNIT_MAP)) {
+        if (unitRaw.includes(key)) { result.unit = val; break; }
+      }
+      if (!result.unit) result.unit = "ton";
     }
-    if (!result.unit) result.unit = "ton";
   }
 
   // 8. Extract numbers for WR size
@@ -258,6 +268,7 @@ function parse(text) {
 
     for (const num of allNumbers) {
       if (result.quantity && parseFloat(num.value) === result.quantity) continue;
+      if (qtyBoundValues.has(num.value)) continue; // "5mt" → quantity, not a size
       const asFloat = parseFloat(num.value);
       if (isWRSize(asFloat)) {
         result.size = num.value;
@@ -410,12 +421,94 @@ function parseMultiple(text) {
     if (items.length >= 2) return items;
   }
 
+  const single = parse(text);
+
+  // Shape 3: inline multi-size WITH per-size quantities.
+  // Examples:
+  //   "8mm 2mt and 10mm 5mt"         → WR 8mm 2ton + WR 10mm 5ton
+  //   "hb 8mm 2mt aur 10mm 5mt"      → HB 1/0 (8mm) 2ton + HB 4/0 (10mm) 5ton
+  //   "5.5 3 ton 7mm 2 ton"          → WR 5.5 3ton + WR 7 2ton
+  //   "book 8mm 2mt aur 10mm 5mt"    → 2 items (chatService will route to order flow)
+  //
+  // We scan for size tokens (mm/dia-suffixed) and qty tokens (N + ton/mt/kg/…)
+  // separately, then pair them in document order (each qty belongs to the
+  // nearest preceding size that doesn't yet have one). If we get >= 2 paired
+  // items this takes precedence over Shape 2 (qty is the stronger signal).
+  const sizeTokens = [];
+  const sizeRe = /(\d+(?:\.\d+)?)\s*(?:mm|dia|diameter|मिमी)/gi;
+  let sm;
+  while ((sm = sizeRe.exec(text)) !== null) {
+    sizeTokens.push({ val: sm[1], idx: sm.index });
+  }
+  const qtyTokens = [];
+  const qRe = new RegExp(QTY_REGEX.source, "gi");
+  let qm;
+  while ((qm = qRe.exec(text)) !== null) {
+    qtyTokens.push({ val: parseFloat(qm[1]), idx: qm.index });
+  }
+
+  if (sizeTokens.length >= 2 && qtyTokens.length >= 2) {
+    const hbKeyword = single.category === "hb";
+    const lcCarbon = single.carbonType === "lc";
+    const items = [];
+    for (let i = 0; i < sizeTokens.length; i++) {
+      const s = sizeTokens[i];
+      const sNum = parseFloat(s.val);
+      const nextIdx = sizeTokens[i + 1] ? sizeTokens[i + 1].idx : Infinity;
+      // Pick the first qty token that lives between this size and the next size.
+      const q = qtyTokens.find((t) => t.idx > s.idx && t.idx < nextIdx);
+      if (!q) continue;
+
+      // Category decision per size:
+      // • "hb" keyword anywhere in text → HB (if value is in HB mm range)
+      // • else: WR if the value is a known WR size; otherwise HB if in HB range.
+      const isWRAvail = AVAILABLE_WR_SIZES.includes(s.val);
+      const isHb = hbKeyword
+        ? isHBMmRange(sNum)
+        : (!isWRAvail && isHBMmRange(sNum));
+
+      if (isHb) {
+        items.push({
+          intent: "price_inquiry",
+          raw: text,
+          confidence: 0.9,
+          category: "hb",
+          size: null,
+          sizeAvailable: true,
+          closestSizes: [],
+          carbonType: lcCarbon ? "lc" : "normal",
+          quantity: q.val,
+          unit: "ton",
+          gauge: mmToGauge(sNum),
+          mm: s.val,
+          mmRange: s.val,
+        });
+      } else {
+        items.push({
+          intent: "price_inquiry",
+          raw: text,
+          confidence: 0.9,
+          category: "wr",
+          size: s.val,
+          sizeAvailable: isWRAvail,
+          closestSizes: isWRAvail ? [] : findClosestWRSizes(s.val),
+          carbonType: lcCarbon ? "lc" : "normal",
+          quantity: q.val,
+          unit: "ton",
+          gauge: null,
+          mm: null,
+          mmRange: null,
+        });
+      }
+    }
+    if (items.length >= 2) return items;
+  }
+
   // Shape 2: inline multi-HB — user gave 2+ mm values together with "hb"
   // keyword on a single line. We emit one item per mm so chatService's
   // existing multi-item path renders all requested sizes. Quantity is left
   // empty per item because "hb 8mm 10mm 5 ton" is ambiguous (total vs split),
   // so we only show rates — user can follow up with per-size qty.
-  const single = parse(text);
   if (single.category === "hb") {
     const mms = extractAllHbMms(text);
     if (mms.length >= 2) {
@@ -442,6 +535,15 @@ function parseMultiple(text) {
   return [];
 }
 
+// Broad order-keyword detector — used by chatService to decide whether a
+// message that ALSO carries product/qty info should be routed through the
+// order-confirmation flow (GPT verifyOrder + processOrderConfirmation)
+// instead of the price-inquiry flow. Intentionally permissive: matches the
+// keyword anywhere in the message ("book", "book karo", "8mm 2mt book",
+// "pakka kar do", "confirm please", "le lo", "order de do", etc.).
+const ORDER_KEYWORD_REGEX =
+  /\b(?:book|booked|booking|confirm|confirmed|pakka|pakki|final|finalize|finalise|order|le\s*lo|lelo|बुक|कन्फर्म|पक्का|आर्डर)\b/i;
+
 module.exports = {
   parse,
   parseMultiple,
@@ -451,4 +553,5 @@ module.exports = {
   AVAILABLE_WR_SIZES,
   ALL_HB_GAUGES,
   HB_MM_RANGES,
+  ORDER_KEYWORD_REGEX,
 };
