@@ -105,12 +105,17 @@ module.exports = (clientNsp, socket) => {
         });
       }
 
-      const { category, size, carbonType, gauge, mm } = payload;
+      // Payload also carries binding-specific options (packaging, random).
+      // For nails, `size` holds the inch string (e.g. "3") and `gauge` holds
+      // the gauge (e.g. "8"). pricingService.calculatePrice handles both.
+      const { category, size, carbonType, gauge, mm, packaging, random } = payload || {};
       const result = await pricingService.calculatePrice(category, {
         size,
         carbonType,
         gauge,
         mm,
+        packaging,
+        random,
       });
       callback({ success: true, data: result });
     } catch (err) {

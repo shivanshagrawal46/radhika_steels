@@ -81,6 +81,50 @@ Wrong auto-reply is MUCH worse than letting an employee answer.
    LC works for HB too: "hb lc" / "hb 12g lc" / "5.3 mm lc" / "hb 5g low carbon"
    → category="hb", carbon_type="lc".
 
+3. Binding Wire — annealed wire sold per ton (display unit), 25kg bundles
+   Gauges: 18g and 20g ONLY. Also a "20g random" variant (different rate).
+   Packaging: with wrapper / without wrapper. DEFAULT = without wrapper unless
+   the customer explicitly says "wrapper" / "packing" / "with packaging".
+   Keywords: "binding", "binding wire", "BW", "बाइंडिंग", "बंधन".
+   ⚠️ "18g" or "20g" ALONE (without any "hb" keyword) → category="binding".
+      These two gauges are binding-specific; HB wire's 13g/14g are the smallest.
+   NO carbon type for binding (no LC option).
+   Examples:
+   - "binding" / "bw rate" / "बाइंडिंग का भाव" → category=binding, gauge=empty (quote trio)
+   - "20g" / "binding 20g" / "binding wire 20g without wrapper" → binding 20g without wrapper
+   - "18g" / "binding 18g" → binding 18g without wrapper
+   - "binding 20g wrapper" / "binding 20g with packing" → binding 20g with wrapper
+   - "20g random" / "binding 20 random" → binding 20g random (no wrapper by default)
+   - "binding 20g 5 ton" → binding 20g, 5 tons
+
+4. Nails — sold per ton (rate display); customer quantity in KG (1 ton = 1000 kg).
+   MINIMUM quantity: 500 kg per size (NOT 2 ton — nails are priced finely).
+   Sizing: gauge × inch. Gauges: 6G, 8G, 9G, 10G, 11G, 13G.
+   Inch tokens: 1", 1.5", 2", 2.5", 3", 4", 5", 6" (customer can write
+   2'', 2", 2 inch, 2 inches, 2 इंच — all the same).
+   Keywords: "nails", "nail", "कील", "किल".
+   NO carbon type for nails (no LC option).
+   Valid (gauge, inch) combos (reject others):
+   - 8G: 1", 1.5", 2", 2.5", 3", 4"
+   - 9G: 2", 2.5", 3"
+   - 10G: 2", 2.5", 3"
+   - 11G: 1.5", 2", 2.5"
+   - 13G: 1", 1.5", 2"
+   - 6G: 2.5", 3", 4", 5", 6"
+   If user says just "nails" → category=nails, gauge+inch empty (our system quotes defaults + asks).
+   Examples:
+   - "nails 8g 3 inch 500 kg" / 'nails 8G 3"' → nails 8G 3" 500 kg
+   - "10G 2.5 inch 1 ton" → nails 10G 2.5", unit=kg (1 ton = 1000 kg)
+   - 'nails 13 gauge 1" 500kg' → nails 13G 1" 500 kg
+   - "2 inch 500kg" (no other category word) → category=nails (inch token ⇒ nails)
+
+═══ MULTI-CATEGORY MESSAGES ═══
+One message may ask for multiple categories at once, e.g.:
+"5.5 wr 2mt binding 20g 5mt nails 2inch 500kg"
+→ THREE items: WR 5.5mm 2 ton + Binding 20g 5 ton + Nails 8G 2" 500 kg.
+Our parser already splits these; GPT only sees such a message when it's
+being verified for ORDER CONFIRMATION (see verify_order tool).
+
 ═══ LANGUAGE — Hindi/Hinglish/English ═══
 
 Steel traders speak mixed Hindi-English. Read the FULL sentence before deciding.
@@ -122,6 +166,13 @@ PRICE INQUIRY examples:
 - "hb 8mm 10mm" / "8mm 10mm hb wire" / "hb wire 8mm aur 10mm" → MULTI-ITEM HB (two sizes: 8mm=1/0 + 10mm=4/0)
 - "hb lc" / "hb 12g lc" / "5.3 mm lc" / "5.3 se 5.4 mm lc" → HB wire LC (low carbon)
 - "hb 8mm 10mm lc" → MULTI-ITEM HB, both sizes LC (low carbon)
+- "binding" / "bw" / "binding wire rate" → category=binding (default trio)
+- "binding 20g" / "20g binding" → category=binding, gauge=20
+- "binding 20g with wrapper" → category=binding, gauge=20, packaging=with
+- "binding 20 random" → category=binding, gauge=20, random variant
+- "nails" / "nails rate" → category=nails (defaults)
+- 'nails 8g 3"' / "nails 8 gauge 3 inch" → category=nails, gauge=8, inch=3
+- "nails 10G 2.5 inch 500 kg" → category=nails, gauge=10, inch=2.5, qty=500, unit=kg
 - "rate" / "bhav" / "aaj ka rate" → general price inquiry
 - "LC mein kya rate hai" → LC price for previously discussed product
 - "?" / "." / "haan" as reply → follow_up (same product)
@@ -161,8 +212,9 @@ OTHER:
 
 ═══ OUR ORDER RULES (you KNOW these) ═══
 
-- Minimum per item: 2 ton
-- Minimum total order: 5 ton
+- Minimum per item (WR / HB / Binding): 2 ton
+- Minimum total order (sum of WR + HB + Binding): 5 ton
+- Minimum per item (Nails): 500 kg (NOT 2 ton)
 - Booking advance: flexible — customer sends any amount to book; no fixed minimum enforced
 - Balance: at the time of loading
 - Transport: customer's side
@@ -403,15 +455,25 @@ Look at the conversation history and determine:
 When in doubt, is_order=false. Wrong orders are MUCH worse than missed orders.
 
 PRODUCTS:
-- WR (Wire Rod): sizes 5.5mm, 7mm, 8mm, 10mm, 12mm, 14mm, 16mm, 18mm. Carbon: normal or lc (low carbon).
-- HB Wire: gauges 1g-14g, 1/0-6/0. Specified in mm ranges like "5.3 se 5.4mm". Carbon: normal or lc (low carbon — same ₹800 extra as WR).
+- WR (Wire Rod): sizes 5.5mm, 7mm, 8mm, 10mm, 12mm, 14mm, 16mm, 18mm. Carbon: normal or lc (low carbon). Unit: ton.
+- HB Wire: gauges 1g-14g, 1/0-6/0. Specified in mm ranges like "5.3 se 5.4mm". Carbon: normal or lc (low carbon — same ₹800 extra as WR). Unit: ton.
+- Binding Wire: gauges 18g and 20g only. Packaging = "with" or "without" wrapper
+  (DEFAULT = "without" unless customer says wrapper/packing). Variant "random" applies
+  to 20g ONLY. NO carbon type. Unit: ton.
+- Nails: sized by (gauge, inch). Gauges: 6, 8, 9, 10, 11, 13. Inch: 1, 1.5, 2, 2.5, 3, 4, 5, 6
+  (customer may write 2'', 2", 2 inch, 2 inches, 2 इंच — all the same). NO carbon type.
+  Unit: "kg" (customer typically orders e.g. 500 kg, 1000 kg, 2000 kg).
+  Valid (gauge, inch) combos — reject anything else:
+    8G: 1", 1.5", 2", 2.5", 3", 4"      |   9G: 2", 2.5", 3"
+   10G: 2", 2.5", 3"                    |  11G: 1.5", 2", 2.5"
+   13G: 1", 1.5", 2"                    |   6G: 2.5", 3", 4", 5", 6"
 
 QUANTITY RULES:
-- Each item minimum: 2 tons
-- Total across all items minimum: 5 tons
-- Default unit is "ton" unless specified otherwise
-- ton = tons = tonne = tonnes = mt = mts = m.t. = metric ton — ALL SAME (1 ton = 1000 kg)
+- WR / HB / Binding: each item minimum 2 tons; total across those categories minimum 5 tons. Default unit "ton".
+- Nails: minimum 500 kg per item. Unit ALWAYS "kg" for nails (NOT tons). 1 ton = 1000 kg — if a customer says "1 ton nails" convert to 1000 kg.
+- ton = tons = tonne = tonnes = mt = mts = m.t. = metric ton — ALL SAME (1 ton = 1000 kg).
 - "dia" / "diameter" = just means mm size. Determine WR/HB from the value.
+- Nails is the ONLY category where quantity can legitimately be <2 tons.
 
 ⚠️⚠️⚠️ CRITICAL — NEVER FABRICATE QUANTITIES:
 The customer MUST have explicitly said a number of tons IN THE CHAT
@@ -517,6 +579,38 @@ LANGUAGE: Hindi/Hinglish/English mixed. Examples:
   - "5.5mm 2mt aur 7mm 5mt" (NO "book" keyword) right after we asked qty per
     size for WR 5.5mm + WR 7mm → WR 5.5mm 2 ton + WR 7mm 5 ton, is_order=true
 
+BINDING WIRE EXAMPLES:
+- "binding 20g 5 ton book karo" → category=binding, gauge=20, packaging=without,
+  random=false, quantity=5, unit=ton
+- "binding 18g 3 ton aur 20g 2 ton" → TWO items (both category=binding)
+- "binding 20g wrapper 5 ton" → category=binding, gauge=20, packaging=with
+- "binding 20 random 3 ton book karo" → category=binding, gauge=20, random=true,
+  packaging=without (default)
+- After we quoted 18g/20g/20g-random and user said "20g 5 ton book karo"
+  → category=binding, gauge=20, packaging=without (they didn't say wrapper)
+
+NAILS EXAMPLES (unit MUST be "kg"):
+- 'nails 8g 3" 500 kg book karo' → category=nails, gauge=8, size="3", quantity=500, unit=kg
+- "nails 10 gauge 2.5 inch 1 ton" → category=nails, gauge=10, size="2.5",
+  quantity=1000 (convert 1 ton → 1000 kg), unit=kg
+- "nails 8g 3 inch 500 kg aur 8g 4 inch 500 kg" → TWO nails items
+- After we quoted default nails and user said "8g 3 inch 500 kg"
+  → category=nails, gauge=8, size="3", quantity=500, unit=kg
+
+MULTI-CATEGORY MIXED ORDER EXAMPLES:
+- "5.5 wr 2mt binding 20g 5mt nails 8g 2 inch 500kg book karo" → THREE items:
+    (1) category=wr, size="5.5", quantity=2, unit=ton
+    (2) category=binding, gauge=20, packaging=without, random=false, quantity=5, unit=ton
+    (3) category=nails, gauge=8, size="2", quantity=500, unit=kg
+- "hb 8mm 3 ton aur binding 18g 2 ton book karo" → TWO items:
+    (1) category=hb, gauge="1/0", mm="8", mm_range="8", quantity=3
+    (2) category=binding, gauge=18, packaging=without, quantity=2
+- After we quoted WR 5.5mm + Binding 20g + Nails 8G 3", user says
+  "2 ton, 5 ton, 500 kg book karo" → map IN ORDER to the pending items:
+    (1) WR 5.5mm 2 ton
+    (2) Binding 20g 5 ton (carry the gauge/packaging from our prior listing)
+    (3) Nails 8G 3" 500 kg
+
 ⚠️ HB MM RANGE — CRITICAL:
 Whenever the customer specifies an HB wire mm size or range (e.g. "5.2 se 5.3",
 "5.3 mm", "4.8-5.0"), set BOTH gauge AND mm_range fields:
@@ -546,18 +640,21 @@ const ORDER_VERIFY_TOOLS = [
             items: {
               type: "object",
               properties: {
-                category: { type: "string", enum: ["wr", "hb"] },
-                size: { type: "string", description: "WR size in mm (e.g. '5.5'). Empty if HB." },
-                gauge: { type: "string", description: "HB gauge (e.g. '5', '3/0'). Empty if WR." },
-                mm: { type: "string", description: "HB single mm value (e.g. '5.3'). Empty if WR or not specified." },
+                category: { type: "string", enum: ["wr", "hb", "binding", "nails"] },
+                size: { type: "string", description: "WR size in mm (e.g. '5.5'). Nails: inch as string (e.g. '3', '2.5'). Empty if HB/binding." },
+                gauge: { type: "string", description: "HB gauge (e.g. '5', '3/0'). Binding: '18' or '20'. Nails: '6', '8', '9', '10', '11', '13'. Empty if WR." },
+                mm: { type: "string", description: "HB single mm value (e.g. '5.3'). Empty otherwise." },
                 mm_range: {
                   type: "string",
-                  description: "User's EXACT requested mm range for HB wire as they said it — e.g. '5.2-5.3' for '5.2 se 5.3 mm', or '5.3' if they gave a single value. Empty if WR or only gauge was given.",
+                  description: "User's EXACT requested mm range for HB wire as they said it — e.g. '5.2-5.3' for '5.2 se 5.3 mm', or '5.3' if they gave a single value. Empty if WR/binding/nails or only gauge was given.",
                 },
-                carbon_type: { type: "string", enum: ["normal", "lc"] },
-                quantity: { type: "number", description: "Quantity in tons" },
+                carbon_type: { type: "string", enum: ["normal", "lc"], description: "Only meaningful for WR/HB. Always 'normal' for binding/nails." },
+                packaging: { type: "string", enum: ["with", "without", ""], description: "Binding wire only. 'without' (default) unless customer explicitly says wrapper/packing. Empty for other categories." },
+                random: { type: "boolean", description: "Binding wire only. True if customer said 'random' (applies to 20g only). False otherwise." },
+                quantity: { type: "number", description: "Quantity. Tons for WR/HB/binding, kg for nails. 0 if not stated." },
+                unit: { type: "string", enum: ["ton", "kg"], description: "'ton' for WR/HB/binding, 'kg' for nails. REQUIRED — nails must be 'kg'." },
               },
-              required: ["category", "quantity"],
+              required: ["category", "quantity", "unit"],
             },
           },
           customer_note: {

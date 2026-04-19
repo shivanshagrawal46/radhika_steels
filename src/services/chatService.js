@@ -96,13 +96,37 @@ async function processOrderConfirmation(
   orderResult, conversation, user, io, from, displayName,
   chatHistory = null, currentText = ""
 ) {
-  const items = orderResult.items.map((i) => ({
-    category: i.category, size: i.size || null, gauge: i.gauge || null,
-    mm: i.mm || null,
-    // Carry the user's exact requested mm range (e.g. "5.2-5.3") through to the order
-    mmRange: i.mm_range || i.mmRange || null,
-    carbonType: i.carbon_type || "normal", quantity: i.quantity || 0,
-  }));
+  const items = orderResult.items.map((i) => {
+    const isNails = i.category === "nails";
+    const rawQty = Number(i.quantity) || 0;
+    const rawUnit = String(i.unit || "").toLowerCase();
+    // Nails: normalise quantity to KG. If GPT said unit="ton" for nails
+    // (because the customer said "1 ton nails"), convert → 1000 kg.
+    // If GPT said unit="kg" already, use as-is.
+    let quantity = rawQty;
+    if (isNails && rawUnit === "ton") {
+      quantity = rawQty * 1000;
+    }
+    return {
+      category: i.category,
+      // For WR keep `size` as mm. For nails, GPT sends the inch string in `size`
+      // — keep it in `size` AND mirror it to `inch` so downstream can read either.
+      size: i.size || null,
+      gauge: i.gauge || null,
+      mm: i.mm || null,
+      // Carry the user's exact requested mm range (e.g. "5.2-5.3") through to the order
+      mmRange: i.mm_range || i.mmRange || null,
+      carbonType: i.carbon_type || "normal",
+      // Binding-specific:
+      packaging: i.category === "binding"
+        ? (i.packaging === "with" ? "with" : "without")
+        : null,
+      random: i.category === "binding" ? Boolean(i.random) : false,
+      // Nails-specific:
+      inch: isNails ? (i.inch || i.size || "") : null,
+      quantity,
+    };
+  });
 
   // Guard #1 — any item arrives with no quantity (GPT obeyed our prompt and
   // returned 0 because the customer never stated tons).
@@ -128,10 +152,23 @@ async function processOrderConfirmation(
     return responseBuilder.buildQuantityAskForItems(items);
   }
 
-  const totalQty = items.reduce((sum, i) => sum + (i.quantity || 0), 0);
-  const belowMin = items.filter((i) => (i.quantity || 0) < responseBuilder.MIN_QTY_PER_ITEM);
+  // ── Minimum-quantity check (category-aware):
+  //   • ton items (WR / HB / Binding): MIN_QTY_PER_ITEM (2T) per item,
+  //     MIN_QTY_TOTAL (5T) across the sum of ton items.
+  //   • Nails: MIN_QTY_NAILS_PER_ITEM (500 kg) per item. No total rule
+  //     because nails are billed in kg — the 5T total is only meaningful
+  //     for ton-priced lines.
+  const tonItems = items.filter((i) => i.category !== "nails");
+  const nailsItems = items.filter((i) => i.category === "nails");
+  const totalTonQty = tonItems.reduce((sum, i) => sum + (i.quantity || 0), 0);
+  const tonBelowMin = tonItems.filter((i) => (i.quantity || 0) < responseBuilder.MIN_QTY_PER_ITEM);
+  const nailsBelowMin = nailsItems.filter((i) => (i.quantity || 0) < responseBuilder.MIN_QTY_NAILS_PER_ITEM);
 
-  if (belowMin.length > 0 || totalQty < responseBuilder.MIN_QTY_TOTAL) {
+  if (
+    tonBelowMin.length > 0 ||
+    nailsBelowMin.length > 0 ||
+    (tonItems.length > 0 && totalTonQty < responseBuilder.MIN_QTY_TOTAL)
+  ) {
     return responseBuilder.buildMinQtyError(items);
   }
 
@@ -141,19 +178,16 @@ async function processOrderConfirmation(
   for (const item of items) {
     let price = null;
     try {
-      if (item.category === "wr") {
-        price = await pricingService.calculatePrice("wr", { size: item.size || "5.5", carbonType: item.carbonType });
-      } else if (item.category === "hb") {
-        const hbCarbon = item.carbonType || "normal";
-        price = item.mm
-          ? await pricingService.calculatePrice("hb", { mm: item.mm, carbonType: hbCarbon })
-          : await pricingService.calculatePrice("hb", { gauge: item.gauge || "12", carbonType: hbCarbon });
-      }
+      price = await responseBuilder.priceForItem(item);
     } catch (err) {
       logger.warn(`[ORDER] Price calc failed: ${err.message}`);
     }
     const unitPrice = price ? price.total : 0;
-    const itemTotal = Math.round(unitPrice * (item.quantity || 0));
+    // Nails quantities arrive in kg — the per-ton price must be scaled
+    // by (qty/1000). Everything else is already per-ton.
+    const isNails = item.category === "nails";
+    const qtyTons = isNails ? (item.quantity || 0) / 1000 : (item.quantity || 0);
+    const itemTotal = Math.round(unitPrice * qtyTons);
     grandTotal += itemTotal;
     // Build product name that reflects user's exact size preference.
     // Examples:
@@ -161,6 +195,8 @@ async function processOrderConfirmation(
     //   "HB Wire 5g (5.3mm)" when user said "5.3 dia"
     //   "HB Wire 12g" when user only gave gauge
     //   "WR 5.5mm" for WR (unchanged)
+    //   "Binding Wire 20g 25kg (without wrapper)" for binding
+    //   'Nails 8G 3"' for nails
     let productName;
     if (price) {
       if (item.category === "hb" && item.mmRange) {
@@ -169,15 +205,26 @@ async function processOrderConfirmation(
         productName = price.label;
       }
     } else {
-      productName = `${(item.category || "").toUpperCase()} ${item.size || item.gauge || ""}`.trim();
+      productName = `${(item.category || "").toUpperCase()} ${item.size || item.gauge || item.inch || ""}`.trim();
     }
 
     orderItems.push({
       category: item.category,
       productName,
-      size: item.size, gauge: item.gauge, mm: item.mm, mmRange: item.mmRange || null,
+      size: item.size || (isNails ? item.inch || "" : ""),
+      gauge: item.gauge,
+      mm: item.mm,
+      mmRange: item.mmRange || null,
       carbonType: item.carbonType,
-      quantity: item.quantity, unit: "ton", unitPrice, totalPrice: itemTotal,
+      // Binding-specific:
+      packaging: item.category === "binding" ? (item.packaging === "with" ? "with" : "without") : undefined,
+      random: item.category === "binding" ? Boolean(item.random) : undefined,
+      // Nails-specific:
+      inch: isNails ? (item.inch || item.size || "") : undefined,
+      quantity: item.quantity,
+      unit: isNails ? "kg" : "ton",
+      unitPrice,
+      totalPrice: itemTotal,
     });
   }
 
@@ -663,7 +710,8 @@ const handleIncomingMessage = async (parsed) => {
   const prevTurnWasOrder = lastWasOrder === true;
   const hasSizeOrQtySignal = Boolean(
     parsedIntent.category || parsedIntent.size || parsedIntent.gauge ||
-    parsedIntent.mm || parsedIntent.quantity || multiItems.length >= 2
+    parsedIntent.mm || parsedIntent.inch || parsedIntent.packaging ||
+    parsedIntent.random || parsedIntent.quantity || multiItems.length >= 2
   );
   const forceOrderFlow = hasSizeOrQtySignal && (
     textHasOrderKeyword || (prevTurnWasOrder && !textHasPriceKeyword)
@@ -687,15 +735,10 @@ const handleIncomingMessage = async (parsed) => {
     const userMmRanges = [];
     for (const item of multiItems) {
       try {
-        let price;
-        if (item.category === "wr") {
-          price = await pricingService.calculatePrice("wr", { size: item.size || "5.5", carbonType: item.carbonType });
-        } else if (item.category === "hb") {
-          const hbCarbon = item.carbonType || "normal";
-          price = item.mm
-            ? await pricingService.calculatePrice("hb", { mm: item.mm, carbonType: hbCarbon })
-            : await pricingService.calculatePrice("hb", { gauge: item.gauge || "12", carbonType: hbCarbon });
-        }
+        // responseBuilder.priceForItem dispatches WR / HB / binding / nails
+        // to pricingService with the right defaults — reuse it so multi-item
+        // quotes stay consistent with single-item quotes.
+        const price = await responseBuilder.priceForItem(item);
         if (price) {
           prices.push(price);
           quantities.push(item.quantity || 0);
@@ -709,9 +752,16 @@ const handleIncomingMessage = async (parsed) => {
       responseText = responseBuilder.buildMultiPriceResponse(prices, quantities, userMmRanges);
       parsedIntent.intent = "price_inquiry";
       conversation.context.lastMultiItems = multiItems.map((i) => ({
-        category: i.category, size: i.size || "", gauge: i.gauge || "",
-        mm: i.mm || "", mmRange: i.mmRange || "",
-        carbonType: i.carbonType || "normal", quantity: i.quantity || 0,
+        category: i.category,
+        size: i.size || "",
+        gauge: i.gauge || "",
+        mm: i.mm || "",
+        mmRange: i.mmRange || "",
+        carbonType: i.carbonType || "normal",
+        packaging: i.packaging || null,
+        random: Boolean(i.random),
+        inch: i.inch || "",
+        quantity: i.quantity || 0,
       }));
       conversation.markModified("context");
     }

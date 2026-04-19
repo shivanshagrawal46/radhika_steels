@@ -15,10 +15,16 @@ module.exports = (io, socket) => {
   });
 
   // ── price:calculate ──
+  // Payload accepts every option pricingService.calculatePrice understands:
+  //   { category, size, carbonType, gauge, mm, packaging, random }
+  // packaging + random are only relevant for binding; ignored for other
+  // categories. For nails pass { category: "nails", gauge, size } (size = inch).
   socket.on("price:calculate", async (payload, callback) => {
     try {
-      const { category, size, carbonType, gauge, mm } = payload;
-      const result = await pricingService.calculatePrice(category, { size, carbonType, gauge, mm });
+      const { category, size, carbonType, gauge, mm, packaging, random } = payload || {};
+      const result = await pricingService.calculatePrice(category, {
+        size, carbonType, gauge, mm, packaging, random,
+      });
       callback({ success: true, data: result });
     } catch (err) {
       callback({ success: false, error: err.message });
@@ -53,9 +59,14 @@ module.exports = (io, socket) => {
         updatedAt: new Date(),
       });
 
-      // Broadcast full updated table to all connected clients (/client namespace)
+      // Broadcast full updated table to all connected clients (/client namespace).
+      // Top-level fields (wrBaseRate / bindingRandom20gBasic / nailsBasicRate)
+      // let simple clients show the three admin-entered absolutes without
+      // diving into `table`. Full category arrays are inside `table`.
       io.of("/client").emit("price:updated", {
         wrBaseRate,
+        bindingRandom20gBasic: newRate.bindingRandom20gBasic,
+        nailsBasicRate: newRate.nailsBasicRate,
         table,
         updatedAt: new Date(),
       });
@@ -82,6 +93,68 @@ module.exports = (io, socket) => {
       callback({ success: true, data: { baseRate: newRate, table } });
     } catch (err) {
       logger.error("price:update_base error:", err.message);
+      callback({ success: false, error: err.message });
+    }
+  });
+
+  // ── price:update_admin_absolutes — update ONLY binding-random / nails basic.
+  //
+  // Admin dashboard calls this when updating the two absolute rates that don't
+  // derive from wrBaseRate. WR base is left untouched. Payload:
+  //   { bindingRandom20gBasic?: number, nailsBasicRate?: number }
+  // At least one field must be present. Broadcasts the same full table refresh
+  // as price:update_base so connected admin + client apps stay in sync.
+  socket.on("price:update_admin_absolutes", async (payload, callback) => {
+    try {
+      if (!["admin", "manager"].includes(socket.employee.role)) {
+        return callback({ success: false, error: "Insufficient permissions" });
+      }
+
+      const updates = {};
+      if (payload && Object.prototype.hasOwnProperty.call(payload, "bindingRandom20gBasic")) {
+        const v = Number(payload.bindingRandom20gBasic);
+        if (!isFinite(v) || v < 0) {
+          return callback({ success: false, error: "Invalid bindingRandom20gBasic" });
+        }
+        updates.bindingRandom20gBasic = v;
+      }
+      if (payload && Object.prototype.hasOwnProperty.call(payload, "nailsBasicRate")) {
+        const v = Number(payload.nailsBasicRate);
+        if (!isFinite(v) || v < 0) {
+          return callback({ success: false, error: "Invalid nailsBasicRate" });
+        }
+        updates.nailsBasicRate = v;
+      }
+      if (Object.keys(updates).length === 0) {
+        return callback({ success: false, error: "No admin absolutes provided" });
+      }
+
+      const newRate = await pricingService.updateAdminAbsolutes(updates, socket.employee._id);
+      const table = await pricingService.getFullPriceTable();
+
+      io.to("employees").emit("price:updated", {
+        baseRate: newRate,
+        table,
+        updatedBy: socket.employee.name,
+        updatedAt: new Date(),
+        scope: "absolutes",
+      });
+      io.of("/client").emit("price:updated", {
+        wrBaseRate: newRate.wrBaseRate,
+        bindingRandom20gBasic: newRate.bindingRandom20gBasic,
+        nailsBasicRate: newRate.nailsBasicRate,
+        table,
+        updatedAt: new Date(),
+      });
+
+      logger.info(
+        `[PRICE] Admin absolutes updated ` +
+        Object.entries(updates).map(([k, v]) => `${k}=₹${v}`).join(", ") +
+        ` by ${socket.employee.name}`
+      );
+      callback({ success: true, data: { baseRate: newRate, table } });
+    } catch (err) {
+      logger.error("price:update_admin_absolutes error:", err.message);
       callback({ success: false, error: err.message });
     }
   });

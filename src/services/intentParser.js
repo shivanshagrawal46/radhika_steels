@@ -7,6 +7,30 @@
 
 const AVAILABLE_WR_SIZES = ["5.5", "7", "8", "10", "12", "14", "16", "18"];
 
+// ── Binding wire — only two gauges sold in our domain. Whenever we see "18g"
+// or "20g" we treat the message as binding (HB doesn't have these gauges).
+const BINDING_GAUGES = ["18", "20"];
+
+// ── Nails — every (gauge, inch) combination we sell. Mirrors NAILS_PREMIUMS
+// in pricingService; duplicated here so the parser doesn't depend on the
+// pricing layer.
+const NAILS_GAUGE_SIZE_MAP = {
+  "8":  ["1", "1.5", "2", "2.5", "3", "4"],
+  "9":  ["2", "2.5", "3"],
+  "10": ["2", "2.5", "3"],
+  "11": ["1.5", "2", "2.5"],
+  "13": ["1", "1.5", "2"],
+  "6":  ["2.5", "3", "4", "5", "6"],
+};
+const NAILS_GAUGES = Object.keys(NAILS_GAUGE_SIZE_MAP);
+const NAILS_DEFAULT_GAUGE = "8";
+const NAILS_DEFAULT_SIZES = ["3", "4"];
+
+function isNailsCombo(gauge, size) {
+  const arr = NAILS_GAUGE_SIZE_MAP[String(gauge)];
+  return Array.isArray(arr) && arr.includes(String(size));
+}
+
 const HB_MM_RANGES = [
   { gauge: "6/0", minMm: 11.00, maxMm: 11.80 },
   { gauge: "5/0", minMm: 10.40, maxMm: 11.00 },
@@ -42,8 +66,8 @@ const ALL_HB_GAUGES = [
 const CATEGORY_PATTERNS = {
   wr: /(?:^|[\s,.])(wr|w\.r\.?|wire\s*rod|wirerod|वायर\s*रॉड|तार)(?:$|[\s,.])/i,
   hb: /(?:^|[\s,.])(hb|h\.b\.?|hb\s*wire|एचबी)(?:$|[\s,.])/i,
-  binding: /(?:^|[\s,.])(binding|बाइंडिंग|बंधन)(?:$|[\s,.])/i,
-  nails: /(?:^|[\s,.])(nail|nails|कील|किल)(?:$|[\s,.])/i,
+  binding: /(?:^|[\s,.,?!])(binding\s*wire|binding|bw|बाइंडिंग|बंधन)(?:$|[\s,.,?!])/i,
+  nails: /(?:^|[\s,.,?!])(nails?|कील|किल|कील्स)(?:$|[\s,.,?!])/i,
 };
 
 const LC_PATTERN = /(?:^|[\s,.])(lc|l\.c\.?|low\s*carbon|लो\s*कार्बन)(?:$|[\s,.])/i;
@@ -62,6 +86,28 @@ const UNIT_MAP = {
 const GAUGE_REGEX = /\b(\d\/0|\d+)\s*(?:g|gauge|गेज)\b/i;
 // Slash gauge: "3/0", "4/0" etc. when standalone
 const SLASH_GAUGE_REGEX = /\b([1-6]\/0)\b/;
+
+// ── BINDING WIRE specific ──
+// "18g" / "20g" tokens — strong, unambiguous signal of binding wire.
+// HB never goes above gauge 16, so any 18g/20g is binding.
+const BINDING_GAUGE_REGEX = /\b(18|20)\s*(?:g|gauge|गेज)\b/i;
+// Wrapper / packaging — synonyms: wrapper, packaging, packing, packed.
+// Default is "without wrapper" if customer doesn't say one of these.
+const BINDING_WITH_WRAPPER_REGEX =
+  /\bwith\s*(?:wrapper|wrappers|packaging|packing|pack(?:ed)?)\b|\bpacked\b|\bpackaging\s*(?:wala|वाला)\b|\bwrapper\s*(?:wala|वाला)\b/i;
+const BINDING_WITHOUT_WRAPPER_REGEX =
+  /\bwithout\s*(?:wrapper|wrappers|packaging|packing|pack(?:ed)?)\b|\bbina\s*(?:wrapper|packing|packaging)\b|\bloose\b|\bno\s*(?:wrapper|packaging|packing)\b/i;
+const BINDING_RANDOM_REGEX = /\b(random|रैंडम|रंडम)\b/i;
+
+// ── NAILS specific ──
+// Inch tokens: 2", 2'', 2 inch, 2 inches, 2 इंच, 2"inch.
+// Number → optional space → any of: "inch"/"inches", "इंच", two apostrophes,
+// one-or-more `"`. Note: `inch(?:es)?` is the correct way to allow both
+// "inch" and "inches" — `inches?` would match "inche"/"inches" instead
+// because `s?` binds only to the final char.
+// No trailing \b so that punctuation marks (', ") at end-of-string still
+// match — \b fails there because ' and " are non-word characters.
+const NAILS_INCH_REGEX = /\b(\d+(?:\.\d+)?)\s*(?:inch(?:es)?|इंच|''|"+)/gi;
 
 // "se" pattern for mm ranges: "5.3 se 5.4 mm", "6.8 se 6.9"
 const MM_RANGE_REGEX = /(\d+(?:\.\d+)?)\s*(?:se|to|-|–)\s*(\d+(?:\.\d+)?)\s*(?:mm|मिमी)?\b/i;
@@ -158,6 +204,14 @@ function parse(text) {
     gauge: null,
     mm: null,
     mmRange: null, // user-given mm range string e.g. "5.2-5.3" (preserves what user actually said)
+    // Binding-only fields. `packaging` defaults to null at the parser level
+    // (responseBuilder will fill in "without" downstream when category=binding
+    // and customer didn't say which). `random` is true only when explicitly
+    // mentioned ("random"/"रैंडम").
+    packaging: null,
+    random: false,
+    // Nails-only field — inch size as a string ("2", "2.5", "1.5", …).
+    inch: null,
   };
 
   // 1. Simple intents — greeting and thanks (only full-match, nothing else in message)
@@ -172,7 +226,10 @@ function parse(text) {
     if (result.intent !== "unknown") break;
   }
 
-  // 2. Detect category keyword (wr / hb)
+  // 2. Detect category keyword (wr / hb / binding / nails). Order matters:
+  // when both "binding" and "wr" appear we still want "binding" — so we check
+  // the more specific keywords (binding, nails) first by Object.entries order
+  // (the object literal preserves insertion order in modern JS).
   for (const [cat, pattern] of Object.entries(CATEGORY_PATTERNS)) {
     if (pattern.test(lower)) {
       result.category = cat;
@@ -180,25 +237,79 @@ function parse(text) {
     }
   }
 
+  // 2a. BINDING gauge override — "18g" / "20g" is ALWAYS binding (HB doesn't
+  // sell these). This must run before the generic GAUGE_REGEX in step 4 so
+  // the gauge isn't grabbed as HB.
+  const bindingGaugeMatch = BINDING_GAUGE_REGEX.exec(lower);
+  if (bindingGaugeMatch) {
+    result.category = "binding";
+    result.gauge = bindingGaugeMatch[1]; // "18" or "20"
+  }
+
+  // 2b. BINDING wrapper / random — only meaningful when category is binding.
+  if (result.category === "binding") {
+    if (BINDING_WITH_WRAPPER_REGEX.test(lower)) result.packaging = "with";
+    else if (BINDING_WITHOUT_WRAPPER_REGEX.test(lower)) result.packaging = "without";
+    // else leave null — chatService/responseBuilder defaults to "without".
+    if (BINDING_RANDOM_REGEX.test(lower)) result.random = true;
+  }
+
+  // 2c. NAILS detection — inch token signals nails. We pick the FIRST inch
+  // value as the primary `inch`; multi-inch messages (e.g. "8g 2 inch and
+  // 9g 3 inch nails") are handled by parseMultiple().
+  const inchRe = new RegExp(NAILS_INCH_REGEX.source, "gi");
+  const firstInchMatch = inchRe.exec(lower);
+  if (firstInchMatch && !result.gauge) {
+    // Inch found and gauge not yet decided → this is nails. Set category
+    // first, then let step 4 below pick up the gauge token.
+    result.category = "nails";
+    result.inch = firstInchMatch[1];
+  } else if (firstInchMatch && result.category === "nails") {
+    result.inch = firstInchMatch[1];
+  } else if (result.category === "nails" && !result.inch) {
+    // "nails" keyword with NO inch → leave inch null; downstream will quote
+    // the default 8G 3"+4" pair.
+  }
+
   // 3. Carbon type
   if (LC_PATTERN.test(lower)) result.carbonType = "lc";
 
-  // 4. Detect HB gauge: "12g", "3/0g", "3/0 gauge"
-  const gaugeMatch = GAUGE_REGEX.exec(lower);
-  if (gaugeMatch) {
-    result.gauge = gaugeMatch[1];
-    if (!result.category) result.category = "hb";
-  }
-  if (!result.gauge) {
-    const slashMatch = SLASH_GAUGE_REGEX.exec(lower);
-    if (slashMatch) {
-      result.gauge = slashMatch[1];
+  // 4. Detect HB gauge: "12g", "3/0g", "3/0 gauge". Skip when category was
+  // already locked to binding/nails (binding has its own gauge from step 2a;
+  // for nails we still want to read the gauge below).
+  if (result.category !== "binding") {
+    const gaugeMatch = GAUGE_REGEX.exec(lower);
+    if (gaugeMatch) {
+      result.gauge = gaugeMatch[1];
+      // Only auto-fill HB if no other category was set. For "nails" we keep
+      // the nails category but still capture the gauge.
       if (!result.category) result.category = "hb";
+    }
+    if (!result.gauge && result.category !== "nails") {
+      const slashMatch = SLASH_GAUGE_REGEX.exec(lower);
+      if (slashMatch) {
+        result.gauge = slashMatch[1];
+        if (!result.category) result.category = "hb";
+      }
     }
   }
 
-  // 5. Detect HB mm range: "5.3 se 5.4 mm"
-  const mmRangeMatch = MM_RANGE_REGEX.exec(lower);
+  // 4a. NAILS post-fix — if we found inch + a numeric gauge, validate the
+  // (gauge, inch) pair. If invalid we'll let it through (responseBuilder
+  // will return "unavailable"). If we found inch but no gauge, leave gauge
+  // null so the response can ask the customer for a gauge.
+  if (result.category === "nails" && result.inch && result.gauge) {
+    if (!NAILS_GAUGES.includes(result.gauge)) {
+      // gauge that nails doesn't sell (e.g. user said "12g 2 inch") — let
+      // it flow through; downstream will reply "not available".
+    }
+  }
+
+  // 5. Detect HB mm range: "5.3 se 5.4 mm" — skip when category is already
+  // binding or nails (those aren't specified in mm).
+  const mmRangeMatch = (result.category === "binding" || result.category === "nails")
+    ? null
+    : MM_RANGE_REGEX.exec(lower);
   if (mmRangeMatch) {
     const mm1 = parseFloat(mmRangeMatch[1]);
     const mm2 = parseFloat(mmRangeMatch[2]);
@@ -219,7 +330,8 @@ function parse(text) {
   // Normally we skip values that look like WR sizes (whole numbers or 5.5 in
   // the 3-30 range) so "5.5 dia" stays WR. BUT if the user explicitly said
   // "hb" / "hb wire", then 8mm, 10mm etc. are HB (the user told us so).
-  if (!result.mm && !result.gauge) {
+  // Skip for binding/nails — those categories never specify in mm.
+  if (!result.mm && !result.gauge && result.category !== "binding" && result.category !== "nails") {
     const mmSingle = MM_SINGLE_REGEX.exec(lower);
     if (mmSingle) {
       const mmVal = parseFloat(mmSingle[1]);
@@ -257,8 +369,11 @@ function parse(text) {
     }
   }
 
-  // 8. Extract numbers for WR size
-  if (!result.gauge && !result.mm && !result.size) {
+  // 8. Extract numbers for WR size. Skip entirely for binding/nails — those
+  // categories do NOT have WR-style sizes and numbers like "2" in "2 inch"
+  // or "18" in "18g" would otherwise get mis-picked as WR sizes.
+  if (!result.gauge && !result.mm && !result.size &&
+      result.category !== "binding" && result.category !== "nails") {
     const allNumbers = [];
     let match;
     const numRegex = /(\d+(?:\.\d+)?)/g;
@@ -319,9 +434,13 @@ function parse(text) {
   // "5.5 wr rate" → category=wr, size=5.5, price hint → 0.95
   // "hb 12g rate" → category=hb, gauge=12, price hint → 0.95
   // "5.3 se 5.4mm" → category=hb, mm detected → 0.95
+  // "binding 20g"  → category=binding, gauge=20 → 0.95
+  // "nails 8g 3 inch" → category=nails, gauge=8, inch=3 → 0.95
   // "5.5 3 ton book karo" → order_confirm (NEVER override to price_inquiry!)
   // Everything else → low confidence → GPT decides
-  const hasProduct = result.category && (result.size || result.gauge || result.mm);
+  const hasProduct = result.category && (
+    result.size || result.gauge || result.mm || result.inch
+  );
 
   if (result.intent === "order_confirm") {
     // Keep order_confirm — NEVER override. Low confidence forces GPT verification.
@@ -333,7 +452,12 @@ function parse(text) {
     // already set to 0.95 above
   } else if (result.intent === "unknown" && result.category) {
     result.intent = "price_inquiry";
-    result.confidence = 0.7;
+    // Binding / nails are deterministic with a default quote even when
+    // customer just says "binding" / "nails" (we quote the 18g+20g+20g-
+    // random trio / the 8G 3"+4" default pair). Give them the same 0.95
+    // the detail-rich WR/HB queries get so L2 template handles them and
+    // we skip an otherwise-unnecessary GPT classifyIntent round-trip.
+    result.confidence = (result.category === "binding" || result.category === "nails") ? 0.95 : 0.7;
   }
 
   // 10. Short follow-up / confirmation messages
@@ -414,7 +538,7 @@ function parseMultiple(text) {
     const items = [];
     for (const line of lines) {
       const parsed = parse(line);
-      if (parsed.category && (parsed.size || parsed.gauge || parsed.mm)) {
+      if (parsed.category && (parsed.size || parsed.gauge || parsed.mm || parsed.inch)) {
         items.push(parsed);
       }
     }
@@ -422,6 +546,99 @@ function parseMultiple(text) {
   }
 
   const single = parse(text);
+
+  // Shape 4: inline MULTI-CATEGORY (WR + HB + binding + nails mixed on one line).
+  //
+  // Canonical example the admin asked for:
+  //   "5.5mm wr 2mt binding 20g 5mt Nails 2inch 500kgs"
+  //      ↳ WR 5.5mm 2 ton + Binding 20g 5 ton + Nails 8G 2" 500 kg
+  //
+  // Strategy: scan the text for category "anchors" (wr / hb / binding / nails
+  // and their synonyms + 18g/20g gauge tokens + inch tokens as implicit
+  // nails anchors). Each anchor becomes a boundary; we slice the text at
+  // those boundaries, parse each slice independently, and return all
+  // valid items. Runs BEFORE Shape 3 because "wr"/"binding"/"nails"
+  // keywords in the message are a stronger hint than naked mm tokens.
+  const CAT_ANCHOR_RE = /\b(wire\s*rod|wirerod|wr|hb\s*wire|hb|एचबी|binding\s*wire|binding|bw|बाइंडिंग|बंधन|nails?|कील|किल|18\s*(?:g|gauge|गेज)|20\s*(?:g|gauge|गेज))\b/gi;
+  const anchorMatches = [];
+  {
+    const re = new RegExp(CAT_ANCHOR_RE.source, "gi");
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const tok = m[1].toLowerCase().replace(/\s+/g, " ").trim();
+      let cat;
+      if (/^(wr|wire\s*rod|wirerod)$/i.test(tok)) cat = "wr";
+      else if (/^(hb|hb\s*wire|एचबी)$/i.test(tok)) cat = "hb";
+      else if (/^(binding|binding\s*wire|bw|बाइंडिंग|बंधन|18\s*(?:g|gauge|गेज)|20\s*(?:g|gauge|गेज))$/i.test(tok)) cat = "binding";
+      else if (/^(nail|nails|कील|किल)$/i.test(tok)) cat = "nails";
+      if (cat) anchorMatches.push({ cat, idx: m.index, end: m.index + m[0].length, tok });
+    }
+  }
+
+  // Also treat the FIRST inch token as an implicit nails anchor when no
+  // explicit nails keyword is present in the message.
+  {
+    const inchRe = new RegExp(NAILS_INCH_REGEX.source, "gi");
+    const hasExplicitNails = anchorMatches.some((a) => a.cat === "nails");
+    const firstInch = inchRe.exec(text);
+    if (firstInch && !hasExplicitNails) {
+      anchorMatches.push({ cat: "nails", idx: firstInch.index, end: firstInch.index + firstInch[0].length, tok: "(inch)" });
+    }
+  }
+
+  anchorMatches.sort((a, b) => a.idx - b.idx);
+
+  // Dedupe anchors of the SAME category that sit within 5 chars of each other
+  // so "binding wire" (matched twice: once as "binding wire", once as "binding")
+  // or "binding 20g" (matched as "binding" AND "20g") collapse to one anchor.
+  const anchors = [];
+  for (const a of anchorMatches) {
+    const prev = anchors[anchors.length - 1];
+    if (prev && prev.cat === a.cat && a.idx - prev.end <= 8) {
+      prev.end = Math.max(prev.end, a.end);
+      continue;
+    }
+    anchors.push({ ...a });
+  }
+
+  const distinctCats = new Set(anchors.map((a) => a.cat));
+  if (anchors.length >= 2 && distinctCats.size >= 2) {
+    const items = [];
+    for (let i = 0; i < anchors.length; i++) {
+      const segStart = anchors[i].idx;
+      // Back-look ONLY for the first segment so patterns like
+      // "5.5mm wr 2mt" (size preceding the category word) still get 5.5mm
+      // bound to the WR segment. For subsequent segments we start exactly at
+      // the anchor — otherwise the PREVIOUS segment's qty ("2mt" in
+      // "wr 2mt binding …") would leak into the current segment and be
+      // mistaken for binding/nails quantity.
+      const extendedStart = i === 0 ? 0 : segStart;
+      const segEnd = i + 1 < anchors.length ? anchors[i + 1].idx : text.length;
+      const segText = text.slice(extendedStart, segEnd).trim();
+
+      const parsedSeg = parse(segText);
+      // Force the segment's category to the anchor's category (e.g. "20g 5mt"
+      // alone would get category=binding from parse(), which is right; but
+      // "2 inch 500kgs" segment, parse() might return category=nails without
+      // gauge; we set it explicitly for safety).
+      parsedSeg.category = anchors[i].cat;
+
+      const hasDetail = Boolean(
+        parsedSeg.size || parsedSeg.gauge || parsedSeg.mm || parsedSeg.inch
+      );
+      // Keep every segment that at least mentions a category — even bare
+      // "binding" or "nails" without a gauge, because responseBuilder knows
+      // how to render the default set for each (18g/20g/20g-random for
+      // binding, 8G 3"+4" for nails).
+      if (hasDetail || segText.length > 0) {
+        items.push(parsedSeg);
+      }
+    }
+    if (items.length >= 2) {
+      // Tag raw so downstream can pass a consolidated response
+      return items.map((it) => ({ ...it, raw: text }));
+    }
+  }
 
   // Shape 3: inline multi-size WITH per-size quantities.
   // Examples:

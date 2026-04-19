@@ -119,6 +119,105 @@ const buildUnavailableSizeResponse = async (size, carbonType, quantity) => {
 };
 
 // ──────────────────────────────────────────────
+// BINDING WIRE — single-SKU rate response
+// ──────────────────────────────────────────────
+const buildBindingResponse = (price, quantity) => {
+  let msg = `${BRAND}\n\n`;
+  msg += `*${price.label}*\n`;
+  msg += `${INR(price.mergedBase)} + ${INR(price.fixedCharge)} + ${price.gstPercent}% GST\n`;
+  msg += `*${INR(price.total)}/ton*`;
+
+  if (quantity && quantity > 0) {
+    const grandTotal = Math.round(price.total * quantity);
+    msg += `\n\n${quantity} ton × ${INR(price.total)} = *${INR(grandTotal)}*`;
+  }
+
+  msg += `\n\n_Rate per ton (1000 kg) incl. GST_`;
+  return msg;
+};
+
+// ──────────────────────────────────────────────
+// BINDING WIRE — "binding" keyword only (no gauge / wrapper specified).
+// Per spec: quote 18g, 20g and 20g random — all WITHOUT wrapper.
+// ──────────────────────────────────────────────
+const buildBindingDefaultResponse = async () => {
+  let msg = `${BRAND}\n`;
+  msg += `\n*Binding Wire rates:*`;
+
+  const variants = [
+    { gauge: "20", random: false },
+    { gauge: "18", random: false },
+    { gauge: "20", random: true },
+  ];
+  for (const v of variants) {
+    try {
+      const p = await pricingService.calculatePrice("binding", {
+        gauge: v.gauge, random: v.random, packaging: "without",
+      });
+      msg += `\n\n▸ *${p.label}*`;
+      msg += `\n${INR(p.mergedBase)} + ${INR(p.fixedCharge)} + ${p.gstPercent}% GST = *${INR(p.total)}/ton*`;
+    } catch {
+      // skip unconfigured variants (e.g. 20g random if admin hasn't set the basic yet)
+    }
+  }
+  msg += `\n\n_Rate per ton (1000 kg) incl. GST_`;
+  msg += `\n_Packaging (wrapper) chahiye toh batayein — alag rate hai._`;
+  return msg;
+};
+
+// ──────────────────────────────────────────────
+// NAILS — single-SKU rate response (rate shown per ton, qty in kg).
+// ──────────────────────────────────────────────
+const buildNailsResponse = (price, quantity) => {
+  let msg = `${BRAND}\n\n`;
+  msg += `*${price.label}*\n`;
+  msg += `${INR(price.mergedBase)} + ${INR(price.fixedCharge)} + ${price.gstPercent}% GST\n`;
+  msg += `*${INR(price.total)}/ton*`;
+
+  if (quantity && quantity > 0) {
+    // Quantity is in KG for nails; convert to ton for the math.
+    const tons = quantity / 1000;
+    const grandTotal = Math.round(price.total * tons);
+    msg += `\n\n${quantity} kg × ${INR(price.total)}/ton = *${INR(grandTotal)}*`;
+  }
+
+  msg += `\n\n_Rate per ton (1000 kg) incl. GST • Minimum 500 kg per size_`;
+  return msg;
+};
+
+// ──────────────────────────────────────────────
+// NAILS — "nails" keyword only (no gauge / inch).
+// Per spec: quote 8G 3" and 8G 4" and ask which gauge + size is needed.
+// ──────────────────────────────────────────────
+const buildNailsDefaultResponse = async () => {
+  let msg = `${BRAND}\n`;
+  msg += `\n*Nails rates:*`;
+  const defaults = [
+    { gauge: "8", size: "3" },
+    { gauge: "8", size: "4" },
+  ];
+  for (const d of defaults) {
+    try {
+      const p = await pricingService.calculatePrice("nails", d);
+      msg += `\n\n▸ *${p.label}*`;
+      msg += `\n${INR(p.mergedBase)} + ${INR(p.fixedCharge)} + ${p.gstPercent}% GST = *${INR(p.total)}/ton*`;
+    } catch {
+      // nails basic not configured yet — just skip so message still renders
+    }
+  }
+  msg += `\n\n*Available gauge × inch:*`;
+  msg += `\n▸ 8G: 1" | 1.5" | 2" | 2.5" | 3" | 4"`;
+  msg += `\n▸ 9G: 2" | 2.5" | 3"`;
+  msg += `\n▸ 10G: 2" | 2.5" | 3"`;
+  msg += `\n▸ 11G: 1.5" | 2" | 2.5"`;
+  msg += `\n▸ 13G: 1" | 1.5" | 2"`;
+  msg += `\n▸ 6G: 2.5" | 3" | 4" | 5" | 6"`;
+  msg += `\n\n_Rate per ton (1000 kg) incl. GST • Minimum 500 kg per size_`;
+  msg += `\n_Kaunsa gauge aur kitna inch chahiye aapko?_`;
+  return msg;
+};
+
+// ──────────────────────────────────────────────
 // Strip mm range from HB label: "HB Wire 5g (5.2-5.6mm)" → "HB Wire 5g"
 // ──────────────────────────────────────────────
 const shortLabel = (label) => label.replace(/\s*\([\d.]+-[\d.]+mm\)/, "");
@@ -126,6 +225,8 @@ const shortLabel = (label) => label.replace(/\s*\([\d.]+-[\d.]+mm\)/, "");
 // ──────────────────────────────────────────────
 // Multi-product response
 // userMmRanges[i] (optional) — user's exact mm range for HB items
+// quantities[i] is interpreted as TON for WR / HB / binding,
+// and as KG for nails.
 // ──────────────────────────────────────────────
 const buildMultiPriceResponse = (prices, quantities, userMmRanges = []) => {
   let msg = `${BRAND}`;
@@ -135,16 +236,28 @@ const buildMultiPriceResponse = (prices, quantities, userMmRanges = []) => {
     const p = prices[i];
     const qty = quantities[i] || 0;
     const userRange = userMmRanges[i] || null;
-    // Use user's range for HB when provided, else short label
-    const label = (userRange && p && p.gauge)
-      ? `HB Wire ${p.gauge}g (${userRange}mm)${p.carbonType === "lc" ? " LC" : ""}`
-      : shortLabel(p.label);
+    // Label selection — HB uses user's exact mm range when provided;
+    // WR / binding / nails use the price's built-in label verbatim.
+    let label;
+    if (p.category === "hb" && userRange && p.gauge) {
+      label = `HB Wire ${p.gauge}g (${userRange}mm)${p.carbonType === "lc" ? " LC" : ""}`;
+    } else {
+      label = shortLabel(p.label);
+    }
     msg += `\n\n▸ *${label}*`;
     msg += `\n${INR(p.mergedBase)} + ${INR(p.fixedCharge)} + ${p.gstPercent}% GST = *${INR(p.total)}/ton*`;
     if (qty > 0) {
-      const itemTotal = Math.round(p.total * qty);
-      grandTotal += itemTotal;
-      msg += `\n${qty} ton × ${INR(p.total)} = *${INR(itemTotal)}*`;
+      // Nails quantity is in kg; everything else is in ton.
+      if (p.category === "nails") {
+        const tons = qty / 1000;
+        const itemTotal = Math.round(p.total * tons);
+        grandTotal += itemTotal;
+        msg += `\n${qty} kg × ${INR(p.total)}/ton = *${INR(itemTotal)}*`;
+      } else {
+        const itemTotal = Math.round(p.total * qty);
+        grandTotal += itemTotal;
+        msg += `\n${qty} ton × ${INR(p.total)} = *${INR(itemTotal)}*`;
+      }
     }
   }
 
@@ -154,14 +267,20 @@ const buildMultiPriceResponse = (prices, quantities, userMmRanges = []) => {
   }
 
   msg += `\n\n_Rate per ton (1000 kg) incl. GST_`;
+  // Only mention the 500kg nails min when at least one nails item is present —
+  // otherwise this is the regular WR/HB/binding combined quote.
+  if (prices.some((p) => p && p.category === "nails")) {
+    msg += `\n_Nails minimum 500 kg per size._`;
+  }
   return msg;
 };
 
 // ──────────────────────────────────────────────
 // Order Confirmation
 // ──────────────────────────────────────────────
-const MIN_QTY_PER_ITEM = 2;
-const MIN_QTY_TOTAL = 5;
+const MIN_QTY_PER_ITEM = 2;        // tons — applies to wr/hb/binding
+const MIN_QTY_TOTAL = 5;           // tons — sum of wr+hb+binding
+const MIN_QTY_NAILS_PER_ITEM = 500; // kg — applies to nails only
 const ADVANCE_AMOUNT = 50000;
 
 // Build the display label for a single order item — uses user's exact mm
@@ -172,6 +291,39 @@ const buildItemLabel = (item, price) => {
     return `HB Wire ${price.gauge}g (${item.mmRange}mm)${lc}`;
   }
   return shortLabel(price ? price.label : "");
+};
+
+// Map an order item → the right pricingService call. Centralises the
+// WR / HB / binding / nails dispatch so both buildOrderConfirmation and
+// any other caller stays consistent with pricingService defaults.
+const priceForItem = async (item) => {
+  if (item.category === "wr") {
+    return pricingService.calculatePrice("wr", {
+      size: item.size || "5.5",
+      carbonType: item.carbonType || "normal",
+    });
+  }
+  if (item.category === "hb") {
+    const carbonType = item.carbonType || "normal";
+    if (item.mm) {
+      return pricingService.calculatePrice("hb", { mm: item.mm, carbonType });
+    }
+    return pricingService.calculatePrice("hb", { gauge: item.gauge || "12", carbonType });
+  }
+  if (item.category === "binding") {
+    return pricingService.calculatePrice("binding", {
+      gauge: String(item.gauge || "20"),
+      packaging: item.packaging === "with" ? "with" : "without",
+      random: Boolean(item.random),
+    });
+  }
+  if (item.category === "nails") {
+    return pricingService.calculatePrice("nails", {
+      gauge: String(item.gauge || "8"),
+      size: String(item.size || item.inch || ""),
+    });
+  }
+  return null;
 };
 
 /**
@@ -189,25 +341,14 @@ const buildOrderConfirmation = async (items, opts = {}) => {
   if (orderNumber) msg += `\nOrder #: *${orderNumber}*`;
 
   let grandTotal = 0;
-  let totalQty = 0;
+  let totalTons = 0;   // sum of ton-based items (wr/hb/binding)
+  let totalKgNails = 0; // nails-only kg total, shown separately
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     let price;
     try {
-      if (item.category === "wr") {
-        price = await pricingService.calculatePrice("wr", {
-          size: item.size || "5.5",
-          carbonType: item.carbonType || "normal",
-        });
-      } else if (item.category === "hb") {
-        const hbCarbon = item.carbonType || "normal";
-        if (item.mm) {
-          price = await pricingService.calculatePrice("hb", { mm: item.mm, carbonType: hbCarbon });
-        } else {
-          price = await pricingService.calculatePrice("hb", { gauge: item.gauge || "12", carbonType: hbCarbon });
-        }
-      }
+      price = await priceForItem(item);
     } catch (err) {
       logger.warn(`[ORDER] Price calc failed for item ${i}: ${err.message}`);
       continue;
@@ -215,19 +356,32 @@ const buildOrderConfirmation = async (items, opts = {}) => {
     if (!price) continue;
 
     const qty = item.quantity || 0;
-    const itemTotal = Math.round(price.total * qty);
+    // Nails quantities are in kg; everything else is in ton.
+    const isNails = item.category === "nails";
+    const tonsForMath = isNails ? qty / 1000 : qty;
+    const itemTotal = Math.round(price.total * tonsForMath);
     grandTotal += itemTotal;
-    totalQty += qty;
+    if (isNails) totalKgNails += qty;
+    else totalTons += qty;
 
     msg += `\n\n▸ *${buildItemLabel(item, price)}*`;
     msg += `\n${INR(price.mergedBase)} + ${INR(price.fixedCharge)} + ${price.gstPercent}% GST = *${INR(price.total)}/ton*`;
     if (qty > 0) {
-      msg += `\n${qty} ton × ${INR(price.total)} = *${INR(itemTotal)}*`;
+      if (isNails) {
+        msg += `\n${qty} kg × ${INR(price.total)}/ton = *${INR(itemTotal)}*`;
+      } else {
+        msg += `\n${qty} ton × ${INR(price.total)} = *${INR(itemTotal)}*`;
+      }
     }
   }
 
   msg += `\n\n─────────────────`;
-  msg += `\n*Total: ${totalQty} ton — ${INR(grandTotal)}*`;
+  // Build the total line — combine ton and kg parts when both are present.
+  const parts = [];
+  if (totalTons > 0) parts.push(`${totalTons} ton`);
+  if (totalKgNails > 0) parts.push(`${totalKgNails} kg nails`);
+  const qtySummary = parts.length ? parts.join(" + ") + " — " : "";
+  msg += `\n*Total: ${qtySummary}${INR(grandTotal)}*`;
 
   // Payment summary — always shows Total / Paid / Remaining.
   // Advance is flexible — customer can pay any amount (less than, equal to,
@@ -273,28 +427,57 @@ const buildOrderPaymentSummary = (order) => {
   return msg;
 };
 
+// Build a min-qty error message. Ton-based items (wr/hb/binding) share the
+// existing 2T-per-item + 5T-total rule; nails items are validated separately
+// at 500 kg per item (no total rule across nails).
 const buildMinQtyError = (items) => {
-  const totalQty = items.reduce((sum, i) => sum + (i.quantity || 0), 0);
+  const tonItems = items.filter((i) => i.category !== "nails");
+  const nailsItems = items.filter((i) => i.category === "nails");
+  const totalTons = tonItems.reduce((sum, i) => sum + (i.quantity || 0), 0);
 
   let msg = `${BRAND}\n\n`;
   msg += `Order ke liye minimum quantity:\n`;
-  msg += `▸ Har item: *${MIN_QTY_PER_ITEM} ton*\n`;
-  msg += `▸ Total: *${MIN_QTY_TOTAL} ton*\n`;
+  if (tonItems.length > 0) {
+    msg += `▸ Har item (WR / HB / Binding): *${MIN_QTY_PER_ITEM} ton*\n`;
+    msg += `▸ Total: *${MIN_QTY_TOTAL} ton*\n`;
+  }
+  if (nailsItems.length > 0) {
+    msg += `▸ Nails (har size): *${MIN_QTY_NAILS_PER_ITEM} kg*\n`;
+  }
 
-  const itemErrors = items.filter((i) => (i.quantity || 0) < MIN_QTY_PER_ITEM);
-  if (itemErrors.length > 0) {
+  const shortItemLabel = (item) => {
+    if (item.category === "wr") return `WR ${item.size || "5.5"}mm`;
+    if (item.category === "hb") {
+      if (item.mm) return `HB ${item.mm}mm`;
+      return `HB ${item.gauge || "12"}g`;
+    }
+    if (item.category === "binding") {
+      const variant = item.random
+        ? (item.packaging === "with" ? "20g random + wrapper" : "20g random")
+        : `${item.gauge || "20"}g${item.packaging === "with" ? " + wrapper" : ""}`;
+      return `Binding ${variant}`;
+    }
+    if (item.category === "nails") {
+      return `Nails ${item.gauge || "8"}G ${item.size || item.inch || ""}"`;
+    }
+    return String(item.category || "item").toUpperCase();
+  };
+
+  const tonErrors = tonItems.filter((i) => (i.quantity || 0) < MIN_QTY_PER_ITEM);
+  const nailsErrors = nailsItems.filter((i) => (i.quantity || 0) < MIN_QTY_NAILS_PER_ITEM);
+
+  if (tonErrors.length > 0 || nailsErrors.length > 0) {
     msg += `\n`;
-    for (const item of itemErrors) {
-      let label;
-      if (item.category === "wr") label = `WR ${item.size || "5.5"}mm`;
-      else if (item.mm) label = `HB ${item.mm}mm`;
-      else label = `HB ${item.gauge || "12"}g`;
-      msg += `${label}: ${item.quantity || 0}T (min ${MIN_QTY_PER_ITEM}T chahiye)\n`;
+    for (const item of tonErrors) {
+      msg += `${shortItemLabel(item)}: ${item.quantity || 0}T (min ${MIN_QTY_PER_ITEM}T chahiye)\n`;
+    }
+    for (const item of nailsErrors) {
+      msg += `${shortItemLabel(item)}: ${item.quantity || 0}kg (min ${MIN_QTY_NAILS_PER_ITEM}kg chahiye)\n`;
     }
   }
 
-  if (totalQty < MIN_QTY_TOTAL) {
-    msg += `\nTotal: ${totalQty}T (min ${MIN_QTY_TOTAL}T chahiye)`;
+  if (tonItems.length > 0 && totalTons < MIN_QTY_TOTAL) {
+    msg += `\nTotal (WR/HB/Binding): ${totalTons}T (min ${MIN_QTY_TOTAL}T chahiye)`;
   }
 
   msg += `\n\n_Quantity badhake confirm karein._`;
@@ -327,6 +510,19 @@ const itemShortLabel = (item) => {
     }
     return `HB Wire ${g}g${lc}`;
   }
+  if (item.category === "binding") {
+    const g = item.gauge || "20";
+    const wrapper = item.packaging === "with" ? "with wrapper" : "without wrapper";
+    const variantTag = item.random
+      ? (item.packaging === "with" ? "random, with wrapper" : "random")
+      : wrapper;
+    return `Binding Wire ${g}g 25kg (${variantTag})`;
+  }
+  if (item.category === "nails") {
+    const g = item.gauge || "8";
+    const s = item.size || item.inch || "";
+    return `Nails ${g}G${s ? ` ${s}"` : ""}`;
+  }
   return `${String(item.category || "").toUpperCase()} ${item.size || item.gauge || ""}`.trim();
 };
 
@@ -344,12 +540,27 @@ const buildQuantityAskForItems = (items, userText = "") => {
     return buildOrderQuantityAsk(parsedIntent, userText);
   }
 
-  let msg = `${BRAND}\n\nOrder book karne ke liye har size ke liye kitna ton chahiye, ye bataiye:\n`;
+  const hasNails = list.some((it) => it.category === "nails");
+  const hasTonItems = list.some((it) => it.category !== "nails");
+
+  let msg = `${BRAND}\n\nOrder book karne ke liye har item ke liye quantity bataiye:\n`;
   for (const it of list) {
-    msg += `\n▸ *${itemShortLabel(it)}* — ? ton`;
+    const unitHint = it.category === "nails" ? "? kg" : "? ton";
+    msg += `\n▸ *${itemShortLabel(it)}* — ${unitHint}`;
   }
-  msg += `\n\n_Example: "8mm 3 ton, 10mm 2 ton book karo"_`;
-  msg += `\n_Minimum ${MIN_QTY_PER_ITEM} ton per size, total ${MIN_QTY_TOTAL} ton._`;
+  if (hasNails && hasTonItems) {
+    msg += `\n\n_Example: "8mm 3 ton, 20g 2 ton, nails 500 kg"_`;
+  } else if (hasNails) {
+    msg += `\n\n_Example: "8G 3 inch 500 kg, 10G 2 inch 500 kg"_`;
+  } else {
+    msg += `\n\n_Example: "8mm 3 ton, 10mm 2 ton book karo"_`;
+  }
+  if (hasTonItems) {
+    msg += `\n_Minimum ${MIN_QTY_PER_ITEM} ton per size, total ${MIN_QTY_TOTAL} ton._`;
+  }
+  if (hasNails) {
+    msg += `\n_Nails minimum ${MIN_QTY_NAILS_PER_ITEM} kg per size._`;
+  }
   return msg;
 };
 
@@ -417,7 +628,7 @@ const getTemplate = (key) => TEMPLATES[key] || null;
 // Main entry
 // ──────────────────────────────────────────────
 const buildFromIntent = async (parsedIntent) => {
-  const { intent, category, size, carbonType, quantity, gauge, mm, mmRange, sizeAvailable } = parsedIntent;
+  const { intent, category, size, carbonType, quantity, gauge, mm, mmRange, sizeAvailable, packaging, random, inch } = parsedIntent;
 
   if (intent === "greeting") {
     const text = await buildGreeting();
@@ -457,6 +668,58 @@ const buildFromIntent = async (parsedIntent) => {
       return { text: buildHBResponse(price, quantity, askForMm, mmRange), usedGPT: false };
     }
 
+    // ── BINDING WIRE ────────────────────────────────────────────────
+    // • User said just "binding" (no gauge)  → quote the default trio
+    //   (18g + 20g + 20g-random, all without wrapper).
+    // • User specified a gauge (18 / 20)     → single SKU quote, with
+    //   wrapper / random honoured if present.
+    if (category === "binding") {
+      if (!gauge && !random) {
+        const text = await buildBindingDefaultResponse();
+        return { text, usedGPT: false };
+      }
+      try {
+        const price = await pricingService.calculatePrice("binding", {
+          gauge: String(gauge || "20"),
+          packaging: packaging === "with" ? "with" : "without",
+          random: Boolean(random),
+        });
+        return { text: buildBindingResponse(price, quantity), usedGPT: false };
+      } catch (err) {
+        // E.g. admin hasn't set the 20g-random basic yet — fall back to
+        // the default trio so the customer still sees SOMETHING useful.
+        logger.warn(`[BINDING] price calc failed: ${err.message}`);
+        const text = await buildBindingDefaultResponse();
+        return { text, usedGPT: false };
+      }
+    }
+
+    // ── NAILS ──────────────────────────────────────────────────────
+    // • User said just "nails" (no gauge + no inch) → default quote
+    //   (8G 3" + 8G 4") and ask for gauge + inch.
+    // • User gave gauge + inch → single SKU quote.
+    // • User gave only inch OR only gauge → default quote (ambiguous,
+    //   need both to price one specific SKU).
+    if (category === "nails") {
+      const nailsGauge = gauge ? String(gauge) : null;
+      const nailsInch = inch ? String(inch) : null;
+      if (!nailsGauge || !nailsInch) {
+        const text = await buildNailsDefaultResponse();
+        return { text, usedGPT: false };
+      }
+      try {
+        const price = await pricingService.calculatePrice("nails", {
+          gauge: nailsGauge,
+          size: nailsInch,
+        });
+        return { text: buildNailsResponse(price, quantity), usedGPT: false };
+      } catch (err) {
+        logger.warn(`[NAILS] price calc failed: ${err.message}`);
+        const text = await buildNailsDefaultResponse();
+        return { text, usedGPT: false };
+      }
+    }
+
     if (!category) {
       const price = await pricingService.calculatePrice("wr", { size: "5.5", carbonType: "normal" });
       return { text: buildWRResponse(price, quantity, true), usedGPT: false };
@@ -473,6 +736,10 @@ const buildFromIntent = async (parsedIntent) => {
 module.exports = {
   buildWRResponse,
   buildHBResponse,
+  buildBindingResponse,
+  buildBindingDefaultResponse,
+  buildNailsResponse,
+  buildNailsDefaultResponse,
   buildUnavailableSizeResponse,
   buildMultiPriceResponse,
   buildOrderConfirmation,
@@ -483,11 +750,14 @@ module.exports = {
   buildGreeting,
   buildDeliveryResponse,
   buildFromIntent,
+  priceForItem,
+  itemShortLabel,
   getTemplate,
   TEMPLATES,
   INR,
   BRAND,
   MIN_QTY_PER_ITEM,
   MIN_QTY_TOTAL,
+  MIN_QTY_NAILS_PER_ITEM,
   ADVANCE_AMOUNT,
 };

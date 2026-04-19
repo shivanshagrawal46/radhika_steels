@@ -17,8 +17,16 @@ const orderItemSchema = new mongoose.Schema(
     // this to know which specific size within the gauge the customer wants.
     mmRange: { type: String, default: null },
     carbonType: { type: String, enum: ["normal", "lc"], default: "normal" },
+    // Binding-specific: "without" (default) or "with" wrapper; random applies
+    // only to 20g binding.
+    packaging: { type: String, enum: ["without", "with", null], default: null },
+    random: { type: Boolean, default: false },
+    // Nails-specific: inch token ("1", "1.5", "2", "2.5", "3", "4", "5", "6").
+    // Stored in addition to `size` for forward-compatibility; admin dashboards
+    // can read either field.
+    inch: { type: String, default: null },
     quantity: { type: Number, required: true, min: 0 },
-    unit: { type: String, default: "ton" },
+    unit: { type: String, default: "ton" }, // "ton" for wr/hb/binding, "kg" for nails
     unitPrice: { type: Number, default: 0, min: 0 },
     totalPrice: { type: Number, default: 0, min: 0 },
   },

@@ -57,6 +57,26 @@ const baseRateSchema = new mongoose.Schema(
       default: 18,
     },
 
+    // ── Binding Wire — admin-entered absolute basic for "20g random" only.
+    // All other binding SKUs derive from wrBaseRate via hard-coded constants
+    // in pricingService (see BINDING_PREMIUM_OVER_55, BINDING_EXTRA_OVER_55,
+    // BINDING_18G_DISCOUNT, BINDING_PACKAGING_EXTRA, BINDING_LOADING).
+    bindingRandom20gBasic: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    // ── Nails — admin-entered absolute basic that covers the "default cluster"
+    // (8G × {3", 4"}, 9G × {2", 2.5", 3"}, 10G × {2", 2.5", 3"}). All other
+    // nails (gauge × inch) combinations derive from this via hard-coded
+    // premiums in pricingService (see NAILS_PREMIUMS, NAILS_LOADING).
+    nailsBasicRate: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
     isActive: {
       type: Boolean,
       default: true,
