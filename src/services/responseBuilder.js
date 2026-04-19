@@ -594,22 +594,65 @@ const buildDeliveryResponse = (order) => {
 };
 
 // ──────────────────────────────────────────────
+// GENERIC RATE INQUIRY — fires when customer asks "rate" / "today's rate" /
+// "aaj ka bhav" without naming any category. Per spec we quote WR 5.5mm +
+// Binding 18g (without wrapper) + Binding 20g (without wrapper) so the
+// customer sees both mainline SKUs in one reply and can pick.
+// ──────────────────────────────────────────────
+const buildDefaultRatesResponse = async (quantity) => {
+  let msg = `${BRAND}\n`;
+  msg += `\n*Aaj ke rates:*`;
+
+  const lines = [
+    { category: "wr", options: { size: "5.5", carbonType: "normal" }, fallback: "WR 5.5mm" },
+    { category: "binding", options: { gauge: "20", packaging: "without", random: false }, fallback: "Binding Wire 20g 25kg (without wrapper)" },
+    { category: "binding", options: { gauge: "18", packaging: "without", random: false }, fallback: "Binding Wire 18g 25kg (without wrapper)" },
+  ];
+
+  for (const l of lines) {
+    try {
+      const p = await pricingService.calculatePrice(l.category, l.options);
+      msg += `\n\n▸ *${p.label}*`;
+      msg += `\n${INR(p.mergedBase)} + ${INR(p.fixedCharge)} + ${p.gstPercent}% GST = *${INR(p.total)}/ton*`;
+      if (quantity && quantity > 0) {
+        msg += `\n_${quantity} ton × ${INR(p.total)} = ${INR(Math.round(p.total * quantity))}_`;
+      }
+    } catch {
+      msg += `\n\n▸ *${l.fallback}*`;
+      msg += `\n_Rate update hona baki hai — thodi der me bhejte hain._`;
+    }
+  }
+
+  msg += `\n\n_Rate per ton (1000 kg) incl. GST_`;
+  msg += `\n_HB Wire / Nails chahiye toh size ke saath bataiye._`;
+  return msg;
+};
+
+// ──────────────────────────────────────────────
 // Template responses
 // ──────────────────────────────────────────────
 const buildGreeting = async () => {
   let msg = `${BRAND}\n\nNamaste! 🙏\n`;
-  try {
-    const wr = await pricingService.calculatePrice("wr", { size: "5.5", carbonType: "normal" });
-    msg += `\n*WR 5.5mm*\n`;
-    msg += `${INR(wr.mergedBase)} + ${INR(wr.fixedCharge)} + ${wr.gstPercent}% GST\n`;
-    msg += `*${INR(wr.total)}/ton*\n`;
-  } catch { /* skip */ }
-  try {
-    const hb = await pricingService.calculatePrice("hb", { gauge: "12" });
-    msg += `\n*HB Wire 12g*\n`;
-    msg += `${INR(hb.mergedBase)} + ${INR(hb.fixedCharge)} + ${hb.gstPercent}% GST\n`;
-    msg += `*${INR(hb.total)}/ton*\n`;
-  } catch { /* skip */ }
+
+  // Greeting quote: WR 5.5mm, HB 12g, Binding 20g + 18g (both without
+  // wrapper). Each block is wrapped in try/catch so a missing rate (e.g.
+  // admin hasn't set bindingRandom20gBasic) doesn't break the greeting.
+  const blocks = [
+    { category: "wr", options: { size: "5.5", carbonType: "normal" } },
+    { category: "hb", options: { gauge: "12", carbonType: "normal" } },
+    { category: "binding", options: { gauge: "20", packaging: "without", random: false } },
+    { category: "binding", options: { gauge: "18", packaging: "without", random: false } },
+  ];
+
+  for (const b of blocks) {
+    try {
+      const p = await pricingService.calculatePrice(b.category, b.options);
+      msg += `\n*${p.label}*\n`;
+      msg += `${INR(p.mergedBase)} + ${INR(p.fixedCharge)} + ${p.gstPercent}% GST\n`;
+      msg += `*${INR(p.total)}/ton*\n`;
+    } catch { /* skip SKUs that aren't configured yet */ }
+  }
+
   msg += `\nAapko kaunsa size chahiye? Bataiye.`;
   return msg;
 };
@@ -773,8 +816,12 @@ const buildFromIntent = async (parsedIntent) => {
     }
 
     if (!category) {
-      const price = await pricingService.calculatePrice("wr", { size: "5.5", carbonType: "normal" });
-      return { text: buildWRResponse(price, quantity, true), usedGPT: false };
+      // Generic "rate" / "today's rate" / "aaj ka bhav" — no category in
+      // the message. Quote WR 5.5mm + Binding 18g + Binding 20g (all
+      // without wrapper) so the customer sees our mainline SKUs in one
+      // reply.
+      const text = await buildDefaultRatesResponse(quantity);
+      return { text, usedGPT: false };
     }
   }
 
@@ -800,6 +847,7 @@ module.exports = {
   buildOrderQuantityAsk,
   buildQuantityAskForItems,
   buildGreeting,
+  buildDefaultRatesResponse,
   buildDeliveryResponse,
   buildFromIntent,
   priceForItem,
