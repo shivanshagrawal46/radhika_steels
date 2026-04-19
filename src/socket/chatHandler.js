@@ -1,5 +1,6 @@
 const { Conversation, Message, User, Contact } = require("../models");
 const chatService = require("../services/chatService");
+const { resolveDisplayName } = require("../services/contactsService");
 const logger = require("../config/logger");
 
 module.exports = (io, socket) => {
@@ -27,7 +28,9 @@ module.exports = (io, socket) => {
       ]);
 
       const phones = conversations.map((c) => c.user?.phone || c.user?.waId).filter(Boolean);
-      const contacts = await Contact.find({ phone: { $in: phones } }).lean();
+      const contacts = await Contact.find({ phone: { $in: phones } })
+        .sort({ updatedAt: -1 })
+        .lean();
       const contactMap = {};
       for (const c of contacts) {
         if (!contactMap[c.phone]) contactMap[c.phone] = [];
@@ -37,10 +40,10 @@ module.exports = (io, socket) => {
       const enriched = conversations.map((c) => {
         const phone = c.user?.phone || c.user?.waId || "";
         const imported = contactMap[phone] || [];
-        const displayName =
-          c.user?.partyName || c.user?.firmName ||
-          (imported.length > 0 ? imported[0].contactName : "") ||
-          c.user?.contactName || c.user?.name || phone;
+        const displayName = resolveDisplayName({
+          user: c.user,
+          contacts: imported,
+        }) || phone;
         return { ...c, displayName, importedContacts: imported };
       });
 
@@ -91,6 +94,37 @@ module.exports = (io, socket) => {
         model: "User",
       });
 
+      // Attach displayName to every conversation so the frontend never has
+      // to pick between fields on its own. Pulls imported Contact names in
+      // one pass for all phones in the pipeline.
+      const allPhones = new Set();
+      for (const group of populated) {
+        for (const conv of group.conversations || []) {
+          const ph = conv.user?.phone || conv.user?.waId;
+          if (ph) allPhones.add(ph);
+        }
+      }
+      const contacts = allPhones.size
+        ? await Contact.find({ phone: { $in: Array.from(allPhones) } })
+            .sort({ updatedAt: -1 })
+            .lean()
+        : [];
+      const contactMap = {};
+      for (const c of contacts) {
+        if (!contactMap[c.phone]) contactMap[c.phone] = [];
+        contactMap[c.phone].push(c);
+      }
+      for (const group of populated) {
+        group.conversations = (group.conversations || []).map((conv) => {
+          const phone = conv.user?.phone || conv.user?.waId || "";
+          const imported = contactMap[phone] || [];
+          return {
+            ...conv,
+            displayName: resolveDisplayName({ user: conv.user, contacts: imported }) || phone,
+          };
+        });
+      }
+
       callback({ success: true, data: populated });
     } catch (err) {
       logger.error("chat:pipeline error:", err.message);
@@ -108,7 +142,9 @@ module.exports = (io, socket) => {
         .lean();
 
       const phones = conversations.map((c) => c.user?.phone || c.user?.waId).filter(Boolean);
-      const contacts = await Contact.find({ phone: { $in: phones } }).lean();
+      const contacts = await Contact.find({ phone: { $in: phones } })
+        .sort({ updatedAt: -1 })
+        .lean();
       const contactMap = {};
       for (const c of contacts) {
         if (!contactMap[c.phone]) contactMap[c.phone] = [];
@@ -118,10 +154,10 @@ module.exports = (io, socket) => {
       const enriched = conversations.map((c) => {
         const phone = c.user?.phone || c.user?.waId || "";
         const imported = contactMap[phone] || [];
-        const displayName =
-          c.user?.partyName || c.user?.firmName ||
-          (imported.length > 0 ? imported[0].contactName : "") ||
-          c.user?.contactName || c.user?.name || phone;
+        const displayName = resolveDisplayName({
+          user: c.user,
+          contacts: imported,
+        }) || phone;
         return { ...c, displayName, importedContacts: imported };
       });
 
@@ -146,11 +182,13 @@ module.exports = (io, socket) => {
       }
 
       const phone = conversation.user?.phone || conversation.user?.waId || "";
-      const contacts = await Contact.find({ phone }).lean();
-      const displayName =
-        conversation.user?.partyName || conversation.user?.firmName ||
-        (contacts.length > 0 ? contacts[0].contactName : "") ||
-        conversation.user?.contactName || conversation.user?.name || phone;
+      const contacts = await Contact.find({ phone })
+        .sort({ updatedAt: -1 })
+        .lean();
+      const displayName = resolveDisplayName({
+        user: conversation.user,
+        contacts,
+      }) || phone;
 
       socket.join(`conv:${conversationId}`);
       callback({ success: true, data: { ...conversation, displayName, importedContacts: contacts } });

@@ -19,17 +19,51 @@ const getIO = () => require("../socket").getIO();
  */
 
 // ──────────────────────────────────────────────────────────────
-// Display name resolution (same priority as chatService)
+// Display name resolution — SINGLE SOURCE OF TRUTH for the whole app.
+//
+// Priority (high → low):
+//   1. client.firmName        — business name from the app
+//   2. client.name            — individual name from the app
+//   3. user.partyName         — admin-set party name on the WA user
+//   4. user.firmName          — admin-set firm name on the WA user
+//   5. LATEST Contact.contactName  — phone / Google / admin-edited. When
+//      multiple Contact rows exist for the same phone (different employees
+//      synced independently), we pick the one with the newest updatedAt
+//      so the most-recent save wins team-wide.
+//   6. user.contactName       — legacy per-user contactName (pre-Contact)
+//   7. user.name              — WhatsApp profile name (what the sender set
+//      on WhatsApp themselves) — lowest trust
+//   8. phone / waId           — final fallback
+//
+// Accepts either a single `contact` or a `contacts` array. Callers can mix
+// and match — pass whichever is convenient.
 // ──────────────────────────────────────────────────────────────
-function resolveDisplayName({ client, user, contact }) {
+function pickLatestContact(contacts) {
+  if (!Array.isArray(contacts) || contacts.length === 0) return null;
+  // Sort descending by updatedAt (fallback to createdAt); first wins.
+  const scored = contacts
+    .filter((c) => c && c.contactName)
+    .slice()
+    .sort((a, b) => {
+      const ta = +new Date(a.updatedAt || a.createdAt || 0);
+      const tb = +new Date(b.updatedAt || b.createdAt || 0);
+      return tb - ta;
+    });
+  return scored[0] || null;
+}
+
+function resolveDisplayName({ client, user, contact, contacts } = {}) {
   if (client?.firmName) return client.firmName;
   if (client?.name) return client.name;
   if (user?.partyName) return user.partyName;
   if (user?.firmName) return user.firmName;
-  if (contact?.contactName) return contact.contactName;
+
+  const best = contact || pickLatestContact(contacts);
+  if (best?.contactName) return best.contactName;
+
   if (user?.contactName) return user.contactName;
   if (user?.name) return user.name;
-  return user?.phone || client?.phone || contact?.phone || "";
+  return user?.phone || client?.phone || best?.phone || "";
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -38,10 +72,13 @@ function resolveDisplayName({ client, user, contact }) {
 function buildContactRow(doc) {
   const user = doc.user || null;
   const client = doc.client || null;
+  // Aggregation currently limits to 1 contact per phone; expose it as an
+  // array for the resolver so the rule stays consistent everywhere.
   const contact = doc.contact || null;
+  const contacts = contact ? [contact] : [];
 
   const phone = user?.phone || client?.phone || contact?.phone || "";
-  const displayName = resolveDisplayName({ client, user, contact });
+  const displayName = resolveDisplayName({ client, user, contacts });
 
   return {
     phone,
@@ -106,13 +143,15 @@ const commonLookups = [
   },
   { $unwind: { path: "$client", preserveNullAndEmptyArrays: true } },
 
-  // Lookup imported Contact by phone (first match only)
+  // Lookup imported Contact by phone — pick the MOST RECENTLY UPDATED row
+  // (so "latest save wins" across employees / devices / admin edits).
   {
     $lookup: {
       from: "contacts",
       let: { ph: "$phone" },
       pipeline: [
         { $match: { $expr: { $eq: ["$phone", "$$ph"] } } },
+        { $sort: { updatedAt: -1 } },
         { $limit: 1 },
       ],
       as: "contact",
@@ -341,8 +380,8 @@ const getContactByPhone = async (phone) => {
 
   if (!user && !client) throw new AppError("Contact not found", 404);
 
-  const contact = contacts[0] || null;
-  const displayName = resolveDisplayName({ client, user, contact });
+  // Pass the full array — resolveDisplayName will pick the latest.
+  const displayName = resolveDisplayName({ client, user, contacts });
 
   let orderStats = { totalOrders: 0, activeOrders: 0, totalSpent: 0, lastOrderAt: null };
   let conversation = null;
@@ -493,4 +532,5 @@ module.exports = {
   searchContacts,
   emitContactUpdated,
   resolveDisplayName,
+  pickLatestContact,
 };

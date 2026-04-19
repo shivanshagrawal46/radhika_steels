@@ -1,6 +1,50 @@
-const { Order, Conversation } = require("../models");
+const { Order, Conversation, Contact } = require("../models");
 const AppError = require("../utils/AppError");
 const logger = require("../config/logger");
+const { resolveDisplayName } = require("./contactsService");
+
+// Decorate a single plain (lean) order object with a resolved `displayName`
+// so admin-frontend never has to pick between name/partyName/firmName/...
+// Fetches at most one `Contact` query per call (batched caller-side).
+async function attachDisplayNameToOrder(order) {
+  if (!order) return order;
+  const phone = order?.user?.phone || order?.user?.waId;
+  let contacts = [];
+  if (phone) {
+    contacts = await Contact.find({ phone })
+      .sort({ updatedAt: -1 })
+      .lean();
+  }
+  order.displayName = resolveDisplayName({ user: order.user, contacts }) || phone || "";
+  return order;
+}
+
+// Batched version: fetches Contacts once for many orders.
+async function attachDisplayNameToOrders(orders) {
+  if (!Array.isArray(orders) || orders.length === 0) return orders;
+  const phones = new Set();
+  for (const o of orders) {
+    const ph = o?.user?.phone || o?.user?.waId;
+    if (ph) phones.add(ph);
+  }
+  if (phones.size === 0) {
+    for (const o of orders) o.displayName = "";
+    return orders;
+  }
+  const contacts = await Contact.find({ phone: { $in: Array.from(phones) } })
+    .sort({ updatedAt: -1 })
+    .lean();
+  const map = {};
+  for (const c of contacts) {
+    if (!map[c.phone]) map[c.phone] = [];
+    map[c.phone].push(c);
+  }
+  for (const o of orders) {
+    const ph = o?.user?.phone || o?.user?.waId || "";
+    o.displayName = resolveDisplayName({ user: o.user, contacts: map[ph] || [] }) || ph || "";
+  }
+  return orders;
+}
 
 // Attach a consistent payment summary to any order object (plain JSON from .lean()).
 // Frontend can read order.paymentSummary.{total,paid,remaining,...} directly —
@@ -47,6 +91,7 @@ const getOrderById = async (orderId) => {
     .lean();
 
   if (!order) throw new AppError("Order not found", 404);
+  await attachDisplayNameToOrder(order);
   return withPaymentSummary(order);
 };
 
@@ -125,12 +170,14 @@ const getOrdersByUser = async (userId, page = 1, limit = 20) => {
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
+      .populate("user", "name phone company partyName firmName contactName waId")
       .populate("items.product", "name category")
       .populate("assignedTo", "name")
       .lean(),
     Order.countDocuments({ user: userId }),
   ]);
 
+  await attachDisplayNameToOrders(orders);
   return { orders: orders.map(withPaymentSummary), total, page, totalPages: Math.ceil(total / limit) };
 };
 
@@ -149,6 +196,7 @@ const getOrdersByStatus = async (status, page = 1, limit = 20) => {
     Order.countDocuments(filter),
   ]);
 
+  await attachDisplayNameToOrders(orders);
   return { orders: orders.map(withPaymentSummary), total, page, totalPages: Math.ceil(total / limit) };
 };
 
@@ -172,4 +220,6 @@ module.exports = {
   getOrdersByUser,
   getOrdersByStatus,
   getActiveOrderForUser,
+  attachDisplayNameToOrder,
+  attachDisplayNameToOrders,
 };

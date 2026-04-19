@@ -8,6 +8,7 @@ const openaiService = require("./openaiService");
 const pricingService = require("./pricingService");
 const responseBuilder = require("./responseBuilder");
 const intentParser = require("./intentParser");
+const { resolveDisplayName } = require("./contactsService");
 const env = require("../config/env");
 const logger = require("../config/logger");
 const AppError = require("../utils/AppError");
@@ -56,13 +57,11 @@ async function autoResetIfExpired(conversation) {
   return false;
 }
 
+// Thin wrapper around the centralized resolver — kept for backwards-compat
+// with the rest of this file. Accepts the same (user, contacts) args as
+// before but now always picks the latest-updated contact row.
 function getDisplayName(user, contacts) {
-  if (user.partyName) return user.partyName;
-  if (user.firmName) return user.firmName;
-  if (contacts && contacts.length > 0) return contacts[0].contactName;
-  if (user.contactName) return user.contactName;
-  if (user.name) return user.name;
-  return user.phone || user.waId;
+  return resolveDisplayName({ user, contacts }) || user?.phone || user?.waId || "";
 }
 
 // ─────────────────────────────────────────────────────
@@ -256,6 +255,8 @@ async function processOrderConfirmation(
       items: orderItems,
       grandTotal,
       userId: user._id.toString(),
+      // `displayName` is the canonical field; `userName` kept for legacy.
+      displayName: displayName || user.name || from,
       userName: displayName || user.name || from,
       phone: user.phone || user.waId,
     });
@@ -324,7 +325,10 @@ const handleIncomingMessage = async (parsed) => {
   await autoResetIfExpired(conversation);
 
   // 2c. Resolve display name (party > contact import > WA name > phone)
-  const contacts = await Contact.find({ phone: from }).lean();
+  //     Sort by updatedAt desc so the latest admin/phone/google save wins.
+  const contacts = await Contact.find({ phone: from })
+    .sort({ updatedAt: -1 })
+    .lean();
   const displayName = getDisplayName(user, contacts);
 
   // 3. Handle media
@@ -1549,7 +1553,9 @@ const updatePartyDetails = async (userId, details) => {
 const getUserDisplayInfo = async (userId) => {
   const user = await User.findById(userId).lean();
   if (!user) return null;
-  const contacts = await Contact.find({ phone: user.phone || user.waId }).lean();
+  const contacts = await Contact.find({ phone: user.phone || user.waId })
+    .sort({ updatedAt: -1 })
+    .lean();
   return {
     ...user,
     displayName: getDisplayName(user, contacts),

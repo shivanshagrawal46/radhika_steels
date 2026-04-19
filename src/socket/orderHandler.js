@@ -52,14 +52,23 @@ module.exports = (io, socket) => {
   // ── order:create ──
   socket.on("order:create", async (data, callback) => {
     try {
-      const order = await orderService.createOrder({
+      const created = await orderService.createOrder({
         ...data,
         createdBy: "employee",
       });
 
-      io.to("employees").emit("order:new", order);
-      emitContactForOrder(order);
-      callback({ success: true, data: order });
+      // Re-read with user populated + attach displayName so the broadcast
+      // carries the same shape as order:list / order:get.
+      const full = await Order.findById(created._id)
+        .populate("user", "name phone company partyName firmName contactName waId")
+        .populate("items.product", "name category")
+        .populate("assignedTo", "name email")
+        .lean();
+      if (full) await orderService.attachDisplayNameToOrder(full);
+
+      io.to("employees").emit("order:new", full || created);
+      emitContactForOrder(created);
+      callback({ success: true, data: full || created });
     } catch (err) {
       logger.error("order:create error:", err.message);
       callback({ success: false, error: err.message });
@@ -315,7 +324,8 @@ module.exports = (io, socket) => {
           .limit(10)
           .populate("user", "name phone partyName firmName contactName waId")
           .populate("assignedTo", "name")
-          .lean(),
+          .lean()
+          .then((orders) => orderService.attachDisplayNameToOrders(orders)),
         Order.aggregate([
           { $match: { status: { $nin: ["cancelled", "inquiry"] } } },
           { $group: { _id: null, total: { $sum: "$pricing.grandTotal" }, count: { $sum: 1 } } },
