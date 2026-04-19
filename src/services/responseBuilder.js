@@ -145,9 +145,9 @@ const buildBindingDefaultResponse = async () => {
   msg += `\n*Binding Wire rates:*`;
 
   const variants = [
-    { gauge: "20", random: false },
-    { gauge: "18", random: false },
-    { gauge: "20", random: true },
+    { gauge: "20", random: false, label: `Binding Wire 20g 25kg (without wrapper)` },
+    { gauge: "18", random: false, label: `Binding Wire 18g 25kg (without wrapper)` },
+    { gauge: "20", random: true,  label: `Binding Wire 20g 25kg (random)` },
   ];
   for (const v of variants) {
     try {
@@ -157,7 +157,11 @@ const buildBindingDefaultResponse = async () => {
       msg += `\n\n▸ *${p.label}*`;
       msg += `\n${INR(p.mergedBase)} + ${INR(p.fixedCharge)} + ${p.gstPercent}% GST = *${INR(p.total)}/ton*`;
     } catch {
-      // skip unconfigured variants (e.g. 20g random if admin hasn't set the basic yet)
+      // Rate not configured (typically 20g random before admin enters it).
+      // Per spec the 20g random line MUST still appear — show a clear
+      // "rate pending" placeholder instead of silently dropping it.
+      msg += `\n\n▸ *${v.label}*`;
+      msg += `\n_Rate update hona baki hai — thodi der me bhejte hain._`;
     }
   }
   msg += `\n\n_Rate per ton (1000 kg) incl. GST_`;
@@ -686,10 +690,17 @@ const buildFromIntent = async (parsedIntent) => {
         });
         return { text: buildBindingResponse(price, quantity), usedGPT: false };
       } catch (err) {
-        // E.g. admin hasn't set the 20g-random basic yet — fall back to
-        // the default trio so the customer still sees SOMETHING useful.
+        // Specific SKU couldn't be priced (typically 20g random before admin
+        // enters its basic). Do NOT fall back to the default trio — that
+        // looks like we ignored what the customer asked for. Instead return
+        // a targeted note about THAT SKU.
         logger.warn(`[BINDING] price calc failed: ${err.message}`);
-        const text = await buildBindingDefaultResponse();
+        const pkgLabel = packaging === "with" ? "with wrapper"
+                        : random ? "random"
+                        : "without wrapper";
+        const skuLabel = `Binding Wire ${gauge || "20"}g 25kg (${pkgLabel})`;
+        let text = `${BRAND}\n\n*${skuLabel}*`;
+        text += `\n_Rate update hona baki hai — thodi der me bhejte hain._`;
         return { text, usedGPT: false };
       }
     }
@@ -703,8 +714,28 @@ const buildFromIntent = async (parsedIntent) => {
     if (category === "nails") {
       const nailsGauge = gauge ? String(gauge) : null;
       const nailsInch = inch ? String(inch) : null;
-      if (!nailsGauge || !nailsInch) {
+      // Bare "nails" (no gauge AND no inch) → default quote WITH the
+      // available gauge × inch list so the customer can pick.
+      if (!nailsGauge && !nailsInch) {
         const text = await buildNailsDefaultResponse();
+        return { text, usedGPT: false };
+      }
+      // Customer gave ONLY gauge or ONLY inch → ask for the missing piece
+      // (don't dump the whole default template — they already narrowed it).
+      if (!nailsGauge || !nailsInch) {
+        const valid = pricingService.getNailsAvailableCombos
+          ? pricingService.getNailsAvailableCombos()
+          : [];
+        let text = `${BRAND}\n\n*Nails*`;
+        if (nailsGauge && !nailsInch) {
+          const sizes = valid.filter(c => c.gauge === nailsGauge).map(c => `${c.size}"`);
+          text += `\n${nailsGauge}G me konsa inch chahiye?`;
+          if (sizes.length) text += `\n_${nailsGauge}G available:_ ${sizes.join(" | ")}`;
+        } else {
+          const gauges = [...new Set(valid.filter(c => c.size === nailsInch).map(c => `${c.gauge}G`))];
+          text += `\n${nailsInch}" me konsa gauge chahiye?`;
+          if (gauges.length) text += `\n_${nailsInch}" available in:_ ${gauges.join(" | ")}`;
+        }
         return { text, usedGPT: false };
       }
       try {
@@ -714,8 +745,29 @@ const buildFromIntent = async (parsedIntent) => {
         });
         return { text: buildNailsResponse(price, quantity), usedGPT: false };
       } catch (err) {
+        // Targeted response — do NOT dump the full default template with
+        // the "available gauge × inch" list. The customer asked for a
+        // specific combo; respond about THAT combo only.
         logger.warn(`[NAILS] price calc failed: ${err.message}`);
-        const text = await buildNailsDefaultResponse();
+        const label = `Nails ${nailsGauge}G ${nailsInch}"`;
+        const valid = pricingService.getNailsAvailableCombos
+          ? pricingService.getNailsAvailableCombos()
+          : [];
+        const comboValid = valid.some(c => c.gauge === nailsGauge && c.size === nailsInch);
+        let text = `${BRAND}\n\n*${label}*`;
+        if (!comboValid) {
+          // Bad combo — suggest valid sizes for that gauge only.
+          const sizes = valid.filter(c => c.gauge === nailsGauge).map(c => `${c.size}"`);
+          text += `\nYe combination available nahi hai.`;
+          if (sizes.length) {
+            text += `\n_${nailsGauge}G available sizes:_ ${sizes.join(" | ")}`;
+          } else {
+            text += `\n_${nailsGauge}G hamare paas available nahi hai._`;
+          }
+        } else {
+          // Valid combo, but pricing failed (typically nailsBasicRate not set).
+          text += `\n_Rate update hona baki hai — thodi der me bhejte hain._`;
+        }
         return { text, usedGPT: false };
       }
     }

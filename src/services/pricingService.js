@@ -571,6 +571,7 @@ module.exports = {
   NAILS_DEFAULT_GAUGE,
   NAILS_DEFAULT_SIZES,
   ALL_NAILS_COMBOS,
+  getNailsAvailableCombos: () => ALL_NAILS_COMBOS.map(c => ({ gauge: c.gauge, size: c.size })),
   mmToGauge,
   gaugeToMmRange,
   getActiveBaseRate,
