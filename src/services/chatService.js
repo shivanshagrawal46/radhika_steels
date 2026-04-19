@@ -481,10 +481,22 @@ const handleIncomingMessage = async (parsed) => {
       parsedIntent.mm = oldParsed.mm;
       parsedIntent.mmRange = oldParsed.mmRange;
       parsedIntent.carbonType = oldParsed.carbonType;
+      // Category-specific attributes — MUST carry over too, otherwise a
+      // reply-quote to "Nails 8g 2 inch 600kg" loses the inch and we end up
+      // asking "8G me konsa inch chahiye?". Same applies to binding
+      // wrapper/random flags.
+      parsedIntent.inch = oldParsed.inch || parsedIntent.inch || null;
+      parsedIntent.packaging = oldParsed.packaging || parsedIntent.packaging || null;
+      parsedIntent.random = oldParsed.random || parsedIntent.random || false;
       parsedIntent.quantity = oldParsed.quantity || parsedIntent.quantity;
+      parsedIntent.unit = oldParsed.unit || parsedIntent.unit;
       parsedIntent.intent = "price_inquiry";
       parsedIntent.confidence = 0.95;
-      logger.info(`[CHAT] L1b Reply-to enriched: cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge}`);
+      logger.info(
+        `[CHAT] L1b Reply-to enriched: cat=${parsedIntent.category}, ` +
+        `size=${parsedIntent.size || parsedIntent.gauge || parsedIntent.mm || "-"}, ` +
+        `inch=${parsedIntent.inch || "-"}, pkg=${parsedIntent.packaging || "-"}, random=${parsedIntent.random}`
+      );
     }
 
     // If user replies to an old message with "book karo" / "confirm karo",
@@ -496,9 +508,16 @@ const handleIncomingMessage = async (parsed) => {
       parsedIntent.mm = oldParsed.mm;
       parsedIntent.mmRange = oldParsed.mmRange;
       parsedIntent.carbonType = oldParsed.carbonType;
+      parsedIntent.inch = oldParsed.inch || parsedIntent.inch || null;
+      parsedIntent.packaging = oldParsed.packaging || parsedIntent.packaging || null;
+      parsedIntent.random = oldParsed.random || parsedIntent.random || false;
       parsedIntent.quantity = oldParsed.quantity || parsedIntent.quantity;
       parsedIntent.unit = oldParsed.unit || parsedIntent.unit;
-      logger.info(`[CHAT] L1b Reply-to enriched (order_confirm): cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge}, qty=${parsedIntent.quantity}`);
+      logger.info(
+        `[CHAT] L1b Reply-to enriched (order_confirm): cat=${parsedIntent.category}, ` +
+        `size=${parsedIntent.size || parsedIntent.gauge || parsedIntent.mm || "-"}, ` +
+        `inch=${parsedIntent.inch || "-"}, qty=${parsedIntent.quantity}`
+      );
     }
   }
 
@@ -511,9 +530,16 @@ const handleIncomingMessage = async (parsed) => {
     parsedIntent.mm = ctx.mm || null;
     parsedIntent.mmRange = ctx.mmRange || null;
     parsedIntent.carbonType = ctx.carbonType || "normal";
+    parsedIntent.inch = ctx.inch || parsedIntent.inch || null;
+    parsedIntent.packaging = ctx.packaging || parsedIntent.packaging || null;
+    parsedIntent.random = ctx.random || parsedIntent.random || false;
     parsedIntent.intent = "price_inquiry";
     parsedIntent.confidence = 0.9;
-    logger.info(`[CHAT] L1b Context enriched: cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge || parsedIntent.mm}`);
+    logger.info(
+      `[CHAT] L1b Context enriched: cat=${parsedIntent.category}, ` +
+      `size=${parsedIntent.size || parsedIntent.gauge || parsedIntent.mm || "-"}, ` +
+      `inch=${parsedIntent.inch || "-"}`
+    );
   }
 
   // If order_confirm but no product details in the text and no reply-to,
@@ -537,10 +563,17 @@ const handleIncomingMessage = async (parsed) => {
           parsedIntent.mm = msgParsed.mm || null;
           parsedIntent.mmRange = msgParsed.mmRange || null;
           parsedIntent.carbonType = msgParsed.carbonType || "normal";
+          parsedIntent.inch = msgParsed.inch || parsedIntent.inch || null;
+          parsedIntent.packaging = msgParsed.packaging || parsedIntent.packaging || null;
+          parsedIntent.random = msgParsed.random || parsedIntent.random || false;
           parsedIntent.quantity = parsedIntent.quantity || msgParsed.quantity || null;
-          parsedIntent.unit = parsedIntent.unit || msgParsed.unit || "ton";
+          parsedIntent.unit = parsedIntent.unit || msgParsed.unit || (msgParsed.category === "nails" ? "kg" : "ton");
           enrichedFromRecent = true;
-          logger.info(`[CHAT] L1b Recent-msg enriched (order_confirm): cat=${parsedIntent.category}, size=${parsedIntent.size || parsedIntent.gauge || parsedIntent.mm}, qty=${parsedIntent.quantity}`);
+          logger.info(
+            `[CHAT] L1b Recent-msg enriched (order_confirm): cat=${parsedIntent.category}, ` +
+            `size=${parsedIntent.size || parsedIntent.gauge || parsedIntent.mm || "-"}, ` +
+            `inch=${parsedIntent.inch || "-"}, qty=${parsedIntent.quantity}`
+          );
           break;
         }
       }
@@ -553,9 +586,12 @@ const handleIncomingMessage = async (parsed) => {
         parsedIntent.mm = ctx.mm || null;
         parsedIntent.mmRange = ctx.mmRange || null;
         parsedIntent.carbonType = ctx.carbonType || "normal";
+        parsedIntent.inch = ctx.inch || null;
+        parsedIntent.packaging = ctx.packaging || null;
+        parsedIntent.random = ctx.random || false;
         parsedIntent.quantity = null;
-        parsedIntent.unit = ctx.unit || "ton";
-        logger.info(`[CHAT] L1b Context fallback (order_confirm, no qty): cat=${parsedIntent.category}`);
+        parsedIntent.unit = ctx.unit || (ctx.category === "nails" ? "kg" : "ton");
+        logger.info(`[CHAT] L1b Context fallback (order_confirm, no qty): cat=${parsedIntent.category}, inch=${parsedIntent.inch || "-"}`);
       }
     } catch (err) {
       logger.warn(`[CHAT] L1b Recent-msg lookup failed: ${err.message}`);
@@ -598,22 +634,34 @@ const handleIncomingMessage = async (parsed) => {
     const trimmed = (text || "").trim();
 
     // Case 1: User sends quantity — "5", "5 ton", "5 ton kariye", "10 mt karo"
-    const qtyMatch = trimmed.match(/^(\d+(?:\.\d+)?)\s*(?:ton|tons|mt|mts|tonne|tonnes|metric\s*ton)?\s*(?:kariye|karo|kar\s*do|kijiye|please|chahiye|de\s*do|bhejo|book)?[.!?]*$/i);
+    // For nails the customer replies in kg (e.g. "600 kg"); for WR/HB/binding
+    // they reply in ton/mt. Accept both units here.
+    const qtyMatch = trimmed.match(/^(\d+(?:\.\d+)?)\s*(?:ton|tons|mt|mts|tonne|tonnes|metric\s*ton|kg|kgs|किलो)?\s*(?:kariye|karo|kar\s*do|kijiye|please|chahiye|de\s*do|bhejo|book)?[.!?]*$/i);
     if (qtyMatch) {
       const qty = parseFloat(qtyMatch[1]);
-      if (qty > 0 && qty <= 1000) {
+      const unitRaw = (qtyMatch[0] || "").toLowerCase();
+      const looksKg = /\b(kg|kgs|किलो)\b/.test(unitRaw);
+      const isNails = ctx.category === "nails";
+      // Nails quantities are in kg (500-10000 typical); others in tons (1-1000).
+      const validQty = isNails
+        ? (qty >= 100 && qty <= 50000)
+        : (looksKg ? qty >= 100 && qty <= 50000 : qty > 0 && qty <= 1000);
+      if (validQty) {
         parsedIntent.intent = "order_confirm";
         parsedIntent.category = ctx.category;
         parsedIntent.size = ctx.size || null;
         parsedIntent.gauge = ctx.gauge || null;
         parsedIntent.mm = ctx.mm || null;
         parsedIntent.carbonType = ctx.carbonType || "normal";
+        parsedIntent.inch = ctx.inch || null;
+        parsedIntent.packaging = ctx.packaging || null;
+        parsedIntent.random = Boolean(ctx.random);
         parsedIntent.quantity = qty;
-        parsedIntent.unit = "ton";
+        parsedIntent.unit = isNails || looksKg ? "kg" : "ton";
         parsedIntent.sizeAvailable = true;
         parsedIntent.closestSizes = [];
         parsedIntent.confidence = 0.7;
-        logger.info(`[CHAT] L1c Order quantity: cat=${ctx.category}, qty=${qty}`);
+        logger.info(`[CHAT] L1c Order quantity: cat=${ctx.category}, qty=${qty} ${parsedIntent.unit}, inch=${parsedIntent.inch || "-"}`);
       }
     }
 
@@ -638,6 +686,11 @@ const handleIncomingMessage = async (parsed) => {
       gauge: parsedIntent.gauge || "",
       mm: parsedIntent.mm || "",
       mmRange: parsedIntent.mmRange || "",
+      // Category-specific attributes — carried over so follow-ups
+      // ("?", "today rate") and reply-quotes don't lose the details.
+      inch: parsedIntent.inch || "",
+      packaging: parsedIntent.packaging || null,
+      random: Boolean(parsedIntent.random),
     };
   }
   if (parsedIntent.intent === "negotiation") conversation.context.negotiationActive = true;
