@@ -18,12 +18,13 @@
  *   - This service never touches the chat / AI / order pipelines.
  */
 
-const { RateSubscriber, Message, Conversation, User } = require("../models");
+const { RateSubscriber, Message, Conversation, User, Contact } = require("../models");
 const env = require("../config/env");
 const logger = require("../config/logger");
 const AppError = require("../utils/AppError");
 const whatsappService = require("./whatsappService");
 const pricingService = require("./pricingService");
+const { resolveDisplayName } = require("./contactsService");
 const { formatIstDateOrdinal } = require("../utils/dateUtils");
 
 // ────────────────────────── Helpers ──────────────────────────
@@ -37,8 +38,13 @@ const sanitizePhone = (raw) => {
   return digits;
 };
 
-const pickFirstName = ({ partyName, contactName, firmName, name } = {}) => {
-  const source = (partyName || contactName || name || firmName || "").trim();
+// Salutation pick — matches the global display-name priority.
+// Expects caller to have resolved `displayName` for this recipient already
+// (so it's the same name the admin sees in chat / orders).
+// Falls back to legacy fields for back-compat with callers that pass raw
+// user objects.
+const pickFirstName = ({ displayName, partyName, contactName, firmName, name } = {}) => {
+  const source = (displayName || contactName || partyName || firmName || name || "").trim();
   if (!source) return "ji";
   const first = source.split(/\s+/)[0];
   return first || "ji";
@@ -220,6 +226,23 @@ const broadcastRateUpdate = async (recipients, { onProgress, updateSubscriberMet
 
   const { date, wr55Base, hb12Base } = await buildBatchRateVars();
 
+  // Pre-fetch Contact rows for every recipient phone in ONE query so the
+  // greeting uses the same canonical name the admin sees everywhere else
+  // (chat / orders). Per-recipient lookup would be O(N) queries.
+  const phonesForContactLookup = recipients
+    .map((r) => sanitizePhone(r.phone || r.waId))
+    .filter(Boolean);
+  const contactRows = phonesForContactLookup.length
+    ? await Contact.find({ phone: { $in: phonesForContactLookup } })
+        .sort({ updatedAt: -1 })
+        .lean()
+    : [];
+  const contactMap = {};
+  for (const c of contactRows) {
+    if (!contactMap[c.phone]) contactMap[c.phone] = [];
+    contactMap[c.phone].push(c);
+  }
+
   let sent = 0;
   let failed = 0;
   const errors = [];
@@ -235,7 +258,18 @@ const broadcastRateUpdate = async (recipients, { onProgress, updateSubscriberMet
       continue;
     }
 
-    const firstName = pickFirstName(r);
+    // Use the SAME resolver the rest of the app uses. Contact (if saved)
+    // wins over any legacy partyName / firmName / WA profile name.
+    const displayName = resolveDisplayName({
+      user: {
+        name: r.name,
+        partyName: r.partyName,
+        firmName: r.firmName,
+        contactName: r.contactName,
+      },
+      contacts: contactMap[phone] || [],
+    });
+    const firstName = pickFirstName({ ...r, displayName });
     const params = [firstName, date, wr55Base, hb12Base];
 
     try {

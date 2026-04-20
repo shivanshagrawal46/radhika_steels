@@ -21,19 +21,28 @@ const getIO = () => require("../socket").getIO();
 // ──────────────────────────────────────────────────────────────
 // Display name resolution — SINGLE SOURCE OF TRUTH for the whole app.
 //
+// Rule: ONE phone = ONE name, shown everywhere (chat list, chat header,
+// pipeline, orders list, order detail, contacts screen).
+//
 // Priority (high → low):
-//   1. client.firmName        — business name from the app
-//   2. client.name            — individual name from the app
-//   3. user.partyName         — admin-set party name on the WA user
-//   4. user.firmName          — admin-set firm name on the WA user
-//   5. LATEST Contact.contactName  — phone / Google / admin-edited. When
-//      multiple Contact rows exist for the same phone (different employees
-//      synced independently), we pick the one with the newest updatedAt
-//      so the most-recent save wins team-wide.
-//   6. user.contactName       — legacy per-user contactName (pre-Contact)
-//   7. user.name              — WhatsApp profile name (what the sender set
-//      on WhatsApp themselves) — lowest trust
-//   8. phone / waId           — final fallback
+//   1. LATEST Contact.contactName — imported from phone, Google, or typed
+//      by an admin. Once this exists, it wins over EVERYTHING. This is
+//      the admin's single source of truth. When multiple Contact rows
+//      exist for the same phone (different employees synced their own
+//      phonebook), we pick the one with the newest updatedAt so the most
+//      recent save wins team-wide.
+//   2. client.firmName — business name the client typed themselves when
+//      registering in the mobile app. Shown until an admin overrides via
+//      Contact.
+//   3. client.name — individual name from app signup.
+//   4. user.partyName — (legacy) admin-set party name via chat:update_party.
+//      Kept for backwards compat, but the modern way to edit display name
+//      is contact:save.
+//   5. user.firmName — legacy admin-set firm name.
+//   6. user.contactName — legacy per-user contactName field (pre-Contact).
+//   7. user.name — WhatsApp profile name (what the sender set on WhatsApp
+//      themselves). Lowest trust — used only when nothing else exists.
+//   8. phone / waId — final fallback.
 //
 // Accepts either a single `contact` or a `contacts` array. Callers can mix
 // and match — pass whichever is convenient.
@@ -53,16 +62,23 @@ function pickLatestContact(contacts) {
 }
 
 function resolveDisplayName({ client, user, contact, contacts } = {}) {
-  if (client?.firmName) return client.firmName;
-  if (client?.name) return client.name;
-  if (user?.partyName) return user.partyName;
-  if (user?.firmName) return user.firmName;
-
+  // #1 — Contact ALWAYS wins once saved. Admin-edited / phone / Google.
   const best = contact || pickLatestContact(contacts);
   if (best?.contactName) return best.contactName;
 
+  // #2-#3 — Client self-provided name (shown until an admin saves a Contact).
+  if (client?.firmName) return client.firmName;
+  if (client?.name) return client.name;
+
+  // #4-#6 — Legacy admin-set fields on User (kept for backwards compat).
+  if (user?.partyName) return user.partyName;
+  if (user?.firmName) return user.firmName;
   if (user?.contactName) return user.contactName;
+
+  // #7 — WhatsApp profile name (lowest trust).
   if (user?.name) return user.name;
+
+  // #8 — phone / waId.
   return user?.phone || client?.phone || best?.phone || "";
 }
 
