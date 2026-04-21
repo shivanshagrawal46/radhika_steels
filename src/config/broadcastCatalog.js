@@ -16,13 +16,13 @@
  *   options      — extra args forwarded to pricingService for this product.
  *   loadingCharge— per-product loading in Rs/MT, displayed inline in the
  *                  product line. Must match what pricingService uses for
- *                  the same category (see pricingService BINDING_LOADING
- *                  and BaseRate.fixedCharge), otherwise the message can
- *                  disagree with an order quote later.
+ *                  the same category (see pricingService BINDING_LOADING,
+ *                  NAILS_LOADING, and BaseRate.fixedCharge), otherwise the
+ *                  message can disagree with an order quote later.
  *
- * If you add / remove entries here, clients still keep whatever they were
- * subscribed to — but you MUST run a migration if you remove a key that
- * any active subscriber references, otherwise sends will fail for them.
+ * If you add / remove entries here, any subscriber referencing a removed
+ * key will fail their next send with a clear "Rate unavailable for
+ * product '<key>'" error — re-select their products to fix.
  */
 
 const BROADCAST_CATALOG = [
@@ -34,25 +34,18 @@ const BROADCAST_CATALOG = [
     loadingCharge: 345,
   },
   {
-    key: "wr_7",
-    displayName: "Wire Rod 7mm",
-    category: "wr",
-    options: { size: "7", carbonType: "normal" },
-    loadingCharge: 345,
-  },
-  {
-    key: "hb_10",
-    displayName: "H.B Wire 10g",
-    category: "hb",
-    options: { gauge: "10", carbonType: "normal" },
-    loadingCharge: 345,
-  },
-  {
     key: "hb_12",
     displayName: "H.B Wire 12g",
     category: "hb",
     options: { gauge: "12", carbonType: "normal" },
     loadingCharge: 345,
+  },
+  {
+    key: "binding_18_wow",
+    displayName: "Binding Wire 18g (without wrapper)",
+    category: "binding",
+    options: { gauge: "18", packaging: "without", random: false },
+    loadingCharge: 515,
   },
   {
     key: "binding_20_wow",
@@ -62,10 +55,20 @@ const BROADCAST_CATALOG = [
     loadingCharge: 515,
   },
   {
-    key: "binding_20_ww",
-    displayName: "Binding Wire 20g (with wrapper)",
+    key: "binding_20_random",
+    displayName: "Binding Wire 20g (random)",
     category: "binding",
-    options: { gauge: "20", packaging: "with", random: false },
+    options: { gauge: "20", packaging: "without", random: true },
+    loadingCharge: 515,
+  },
+  {
+    // Nails are priced per (gauge, inch). "8g" alone is not a SKU —
+    // the default cluster covers 8G × {3", 4"}. We broadcast the 3"
+    // variant; change `options.size` to "4" below if you'd prefer 4".
+    key: "nails_8g_3in",
+    displayName: "Nails 8G 3\"",
+    category: "nails",
+    options: { gauge: "8", size: "3" },
     loadingCharge: 515,
   },
 ];

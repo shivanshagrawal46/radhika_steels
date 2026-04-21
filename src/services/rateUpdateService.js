@@ -50,6 +50,16 @@ const {
 } = require("../config/broadcastCatalog");
 const { ensureCustomerId } = require("./customerIdService");
 
+// Lazy io accessor — socket may not be initialised yet when this module
+// loads, and we only need it at runtime to push live chat events.
+const getIO = () => {
+  try {
+    return require("../socket").getIO();
+  } catch {
+    return null;
+  }
+};
+
 // ────────────────────────── Small helpers ──────────────────────────
 
 const sanitizePhone = (raw) => {
@@ -147,6 +157,101 @@ const buildProductLine = (productKey, snapshot) => {
   const base = formatRate(entry.mergedBase);
   if (!base) return "";
   return `${entry.displayName}: ${base} + ${entry.loadingCharge} + 18%`;
+};
+
+// ────────────────────────── Chat persistence ──────────────────────────
+
+/**
+ * Persist a broadcast message into the admin chat (Conversation + Message)
+ * and push live socket events so the admin UI renders it in real time.
+ *
+ * Behaviour mirrors chatService.sendEmployeeMessage() so these broadcast
+ * messages look identical to manually-typed admin messages in the chat UI
+ * (same senderType, same socket events, same delivery-status machinery).
+ *
+ * What this function intentionally does NOT do:
+ *   - It does NOT flip Conversation.handlerType to "employee". A broadcast
+ *     is not an admin taking over the conversation — AI should continue
+ *     handling any replies.
+ *   - It does NOT clear needsAttention / unreadCount. A broadcast has no
+ *     bearing on whether the conversation still needs human attention.
+ *
+ * All failures are swallowed with a warn-log: chat-persistence must NEVER
+ * abort an actual WhatsApp send that already succeeded.
+ */
+const persistBroadcastMessage = async ({
+  phone,
+  text,
+  waResponse,
+  employee,
+  name,
+}) => {
+  try {
+    if (!phone || !text) return null;
+    const io = getIO();
+
+    const user = await User.findOneAndUpdate(
+      { waId: phone },
+      {
+        $set: { phone, lastMessageAt: new Date(), ...(name ? { name } : {}) },
+        $setOnInsert: { waId: phone },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    let conversation = await Conversation.findOne({ user: user._id, status: "active" });
+    if (!conversation) {
+      conversation = await Conversation.create({ user: user._id, handlerType: "ai" });
+    }
+
+    const waMessageId = waResponse?.messages?.[0]?.id || "";
+
+    const message = await Message.create({
+      conversation: conversation._id,
+      sender: { type: "employee", employeeId: employee?._id || null },
+      content: { text, mediaType: "none" },
+      waMessageId,
+      deliveryStatus: waMessageId ? "sent" : "pending",
+      sentAt: waMessageId ? new Date() : null,
+      readByAdmin: true,
+    });
+
+    conversation.messageCount = (conversation.messageCount || 0) + 1;
+    conversation.lastMessage = {
+      text: text.length > 200 ? `${text.slice(0, 197)}...` : text,
+      senderType: "employee",
+      mediaType: "none",
+      timestamp: new Date(),
+    };
+    conversation.lastMessageAt = new Date();
+    await conversation.save();
+
+    if (io) {
+      const populated = await Message.findById(message._id)
+        .populate("sender.employeeId", "name")
+        .lean();
+      const convIdStr = conversation._id.toString();
+      io.to(`conv:${convIdStr}`).emit("chat:new_message", {
+        conversationId: convIdStr,
+        message: populated,
+      });
+      io.to("employees").emit("chat:conversation_updated", {
+        conversationId: convIdStr,
+        lastMessage: conversation.lastMessage,
+        lastMessageAt: conversation.lastMessageAt,
+        handlerType: conversation.handlerType,
+        stage: conversation.stage,
+        needsAttention: conversation.needsAttention,
+      });
+    }
+
+    return message;
+  } catch (err) {
+    logger.warn(
+      `[RATE-BROADCAST] chat-persist failed for ${phone}: ${err.message}`
+    );
+    return null;
+  }
 };
 
 // ────────────────────────── Subscriber CRUD ──────────────────────────
@@ -392,7 +497,10 @@ const buildTemplateParams = ({ subscriber, firstName, statementNumber, period, s
  *     the same number for the same customer, even under retries.
  *   - We pace at 400ms between sends by default to stay under WA's 80/sec.
  */
-const broadcastRateStatement = async (recipients, { onProgress, delayMs = 400 } = {}) => {
+const broadcastRateStatement = async (
+  recipients,
+  { onProgress, delayMs = 400, employee } = {}
+) => {
   if (!Array.isArray(recipients) || recipients.length === 0) {
     return { sent: 0, failed: 0, total: 0, errors: [] };
   }
@@ -481,7 +589,21 @@ const broadcastRateStatement = async (recipients, { onProgress, delayMs = 400 } 
       });
 
       const templateName = pickTemplateForProductCount(effectiveSubscriber.subscribedProducts.length);
-      await whatsappService.sendTemplateMessage(phone, templateName, params, lang);
+      const waResponse = await whatsappService.sendTemplateMessage(phone, templateName, params, lang);
+
+      // Persist into admin chat so the broadcast is visible in the
+      // conversation timeline exactly like any other outbound message.
+      const renderedBody = renderTemplateForPreview(
+        params,
+        effectiveSubscriber.subscribedProducts.length
+      );
+      await persistBroadcastMessage({
+        phone,
+        text: renderedBody,
+        waResponse,
+        employee,
+        name: displayName,
+      });
 
       await RateSubscriber.updateOne(
         { _id: subscriber._id },
@@ -526,12 +648,12 @@ const broadcastRateStatement = async (recipients, { onProgress, delayMs = 400 } 
   return { sent, failed, total, errors, snapshotErrors };
 };
 
-const sendRateStatementToAllSubscribers = async (_employee, opts = {}) => {
+const sendRateStatementToAllSubscribers = async (employee, opts = {}) => {
   const list = await RateSubscriber.find({
     isActive: true,
     subscribedProducts: { $exists: true, $ne: [] },
   }).lean();
-  return broadcastRateStatement(list, opts);
+  return broadcastRateStatement(list, { ...opts, employee });
 };
 
 // ────────────────────── 24h free-window broadcast (plain text) ──────────────────────
@@ -567,7 +689,10 @@ const buildAllProductsTextMessage = ({ firstName, snapshot, period }) => {
  * the last 24h. This does not consume template quota and is free inside
  * the WhatsApp service window.
  */
-const sendAllRatesTo24hReplied = async (_employee, { onProgress, delayMs = 400 } = {}) => {
+const sendAllRatesTo24hReplied = async (
+  employee,
+  { onProgress, delayMs = 400 } = {}
+) => {
   const list = await get24hRepliedUsers();
   if (!list.length) return { sent: 0, failed: 0, total: 0, errors: [] };
 
@@ -612,7 +737,16 @@ const sendAllRatesTo24hReplied = async (_employee, { onProgress, delayMs = 400 }
 
     try {
       const text = buildAllProductsTextMessage({ firstName, snapshot, period });
-      await whatsappService.sendTextMessage(phone, text);
+      const waResponse = await whatsappService.sendTextMessage(phone, text);
+
+      await persistBroadcastMessage({
+        phone,
+        text,
+        waResponse,
+        employee,
+        name: displayName,
+      });
+
       sent++;
       if (onProgress) onProgress({ index: i, total, phone, status: "sent" });
     } catch (err) {
