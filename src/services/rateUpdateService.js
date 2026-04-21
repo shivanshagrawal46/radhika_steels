@@ -674,13 +674,26 @@ const buildAllProductsTextMessage = ({ firstName, snapshot, period }) => {
   lines.push("");
   lines.push(`As requested, here is your ${period.toLowerCase()} rate statement from Radhika Steel.`);
   lines.push("");
-  lines.push("Rate breakdown (Base + Loading + GST):");
-  for (const p of BROADCAST_CATALOG) {
-    const line = buildProductLine(p.key, snapshot);
-    if (line) lines.push(line);
-  }
+  lines.push("*Rate breakdown (Base + Loading + GST):*");
   lines.push("");
-  lines.push("Rates are market-linked and indicative. Please reconfirm at the time of transaction.");
+
+  // One product per block: bold name on its own line, numbers on the
+  // next, blank line between blocks. Reads much cleaner on WhatsApp than
+  // a single dense list.
+  const blocks = [];
+  for (const p of BROADCAST_CATALOG) {
+    const entry = snapshot[p.key];
+    if (!entry) continue;
+    const base = formatRate(entry.mergedBase);
+    if (!base) continue;
+    blocks.push(
+      `*${entry.displayName}*\n${base} + ${entry.loadingCharge} + 18%`
+    );
+  }
+  lines.push(blocks.join("\n\n"));
+
+  lines.push("");
+  lines.push("_Rates are market-linked and indicative. Please reconfirm at the time of transaction._");
   return lines.join("\n");
 };
 

@@ -595,9 +595,9 @@ const buildDeliveryResponse = (order) => {
 
 // ──────────────────────────────────────────────
 // GENERIC RATE INQUIRY — fires when customer asks "rate" / "today's rate" /
-// "aaj ka bhav" without naming any category. Per spec we quote WR 5.5mm +
-// Binding 18g (without wrapper) + Binding 20g (without wrapper) so the
-// customer sees both mainline SKUs in one reply and can pick.
+// "aaj ka bhav" without naming any category. Quotes our full mainline
+// line-up: WR 5.5mm, HB 12g, Binding 18g + 20g (without wrapper), and
+// Nails 8G 3" — so the customer sees every SKU we push as daily updates.
 // ──────────────────────────────────────────────
 const buildDefaultRatesResponse = async (quantity) => {
   let msg = `${BRAND}\n`;
@@ -605,8 +605,10 @@ const buildDefaultRatesResponse = async (quantity) => {
 
   const lines = [
     { category: "wr", options: { size: "5.5", carbonType: "normal" }, fallback: "WR 5.5mm" },
+    { category: "hb", options: { gauge: "12", carbonType: "normal" }, fallback: "HB Wire 12g" },
     { category: "binding", options: { gauge: "20", packaging: "without", random: false }, fallback: "Binding Wire 20g 25kg (without wrapper)" },
     { category: "binding", options: { gauge: "18", packaging: "without", random: false }, fallback: "Binding Wire 18g 25kg (without wrapper)" },
+    { category: "nails", options: { gauge: "8", size: "3" }, fallback: `Nails 8G 3"` },
   ];
 
   for (const l of lines) {
@@ -624,7 +626,7 @@ const buildDefaultRatesResponse = async (quantity) => {
   }
 
   msg += `\n\n_Rate per ton (1000 kg) incl. GST_`;
-  msg += `\n_HB Wire / Nails chahiye toh size ke saath bataiye._`;
+  msg += `\n_Koi aur size ya product chahiye toh bataiye._`;
   return msg;
 };
 
