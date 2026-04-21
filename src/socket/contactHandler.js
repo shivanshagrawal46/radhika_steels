@@ -1,9 +1,14 @@
 const { Contact, User } = require("../models");
 const contactsService = require("../services/contactsService");
 const logger = require("../config/logger");
+const { canonicalizePhone } = require("../utils/phoneUtils");
 
 // Helpers ──────────────────────────────────────────────────────
-const normalizePhone = (raw) => String(raw || "").replace(/[^0-9]/g, "");
+// ALWAYS canonicalise to the CC-prefixed digit form we receive from Meta.
+// Saving "9876543210" here means chat / orders / rate-broadcast lookups
+// (which key on the 12-digit "919876543210" stored on User.phone) will
+// never find the contact — so admin sees a blank name on those rows.
+const normalizePhone = canonicalizePhone;
 
 // Broadcast a fresh unified contact row for one phone so every open admin
 // tab can update chat list / header / order rows live.
@@ -216,6 +221,84 @@ module.exports = (io, socket) => {
       callback({ success: true, data: { deleted: result.deletedCount || 0 } });
     } catch (err) {
       logger.error("contact:delete error:", err.message);
+      callback({ success: false, error: err.message });
+    }
+  });
+
+  /**
+   * contact:backfill_phone_format — ONE-TIME MIGRATION.
+   *
+   * Rewrites every Contact row whose `phone` is not in our canonical
+   * 12-digit "91XXXXXXXXXX" form to that form. Exists because the old
+   * `normalizePhone` stripped non-digits without adding the country code,
+   * so contacts synced as "9876543210" never matched User.phone values
+   * ("919876543210") and their names didn't surface in chat / orders /
+   * rate-broadcast lookups.
+   *
+   * Safe to run repeatedly — already-canonical rows are left alone. If
+   * rewriting a row would clash with an existing (canonical-phone,
+   * syncedBy) row, the duplicate is deleted and the canonical winner
+   * kept, because the unique index would otherwise reject the update.
+   *
+   * Payload: {}
+   * Returns: { scanned, updated, deletedDuplicates }
+   */
+  socket.on("contact:backfill_phone_format", async (_payload, callback) => {
+    try {
+      // Security: require some admin capability here if your auth model
+      // distinguishes roles. For now any connected employee can trigger.
+      const cursor = Contact.find({}).cursor();
+      let scanned = 0;
+      let updated = 0;
+      let deletedDuplicates = 0;
+
+      // Process sequentially — it's a one-shot migration, correctness
+      // beats speed. For larger datasets, convert to bulkWrite batches.
+      // eslint-disable-next-line no-restricted-syntax
+      for await (const row of cursor) {
+        scanned++;
+        const canonical = canonicalizePhone(row.phone);
+        if (!canonical || canonical === row.phone) continue;
+
+        // If another row for this employee already owns the canonical
+        // phone, delete the non-canonical duplicate to respect the
+        // unique (phone, syncedBy) index.
+        const clash = await Contact.findOne({
+          phone: canonical,
+          syncedBy: row.syncedBy,
+          _id: { $ne: row._id },
+        }).lean();
+
+        if (clash) {
+          await Contact.deleteOne({ _id: row._id });
+          deletedDuplicates++;
+          continue;
+        }
+
+        await Contact.updateOne({ _id: row._id }, { $set: { phone: canonical } });
+        updated++;
+      }
+
+      logger.info(
+        `[CONTACTS] backfill by ${socket.employee?.name || "?"} — scanned=${scanned}, updated=${updated}, deletedDuplicates=${deletedDuplicates}`
+      );
+
+      // Every admin tab should refresh its chat list / order list so the
+      // newly-matching names appear live.
+      io.to("employees").emit("contact:bulk_updated", {
+        count: updated,
+        new: 0,
+        updated,
+        source: "migration",
+        by: socket.employee?._id || null,
+      });
+
+      callback({
+        success: true,
+        data: { scanned, updated, deletedDuplicates },
+      });
+    } catch (err) {
+      logger.error("contact:backfill_phone_format error:", err.message);
       callback({ success: false, error: err.message });
     }
   });

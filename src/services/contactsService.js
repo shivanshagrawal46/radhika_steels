@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const { User, Client, Order, Conversation, Contact, Message } = require("../models");
 const AppError = require("../utils/AppError");
 const logger = require("../config/logger");
+const { canonicalizePhone } = require("../utils/phoneUtils");
 
 const getIO = () => require("../socket").getIO();
 
@@ -386,7 +387,9 @@ const listContacts = async (filters = {}) => {
 // ──────────────────────────────────────────────────────────────
 const getContactByPhone = async (phone) => {
   if (!phone) throw new AppError("phone is required", 400);
-  const normalized = String(phone).replace(/[^0-9]/g, "");
+  // Canonical 12-digit form (with 91- prefix for India) — matches how
+  // User / Contact rows are stored since the normaliser fix.
+  const normalized = canonicalizePhone(phone);
 
   const [user, client, contacts] = await Promise.all([
     User.findOne({ $or: [{ phone: normalized }, { waId: normalized }] }).lean(),
@@ -442,7 +445,7 @@ const getContactByPhone = async (phone) => {
 // ──────────────────────────────────────────────────────────────
 const getOrdersByPhone = async (phone, { page = 1, limit = 20, status } = {}) => {
   if (!phone) throw new AppError("phone is required", 400);
-  const normalized = String(phone).replace(/[^0-9]/g, "");
+  const normalized = canonicalizePhone(phone);
 
   const user = await User.findOne({ $or: [{ phone: normalized }, { waId: normalized }] }).lean();
   if (!user) {
