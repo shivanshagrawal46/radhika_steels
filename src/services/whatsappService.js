@@ -115,6 +115,50 @@ const sendButtonMessage = async (to, bodyText, buttons) => {
   }
 };
 
+// ──────────────────── Templates (HSM) ────────────────────
+
+/**
+ * Send a pre-approved WhatsApp template message.
+ *
+ * @param {string}   to             Destination phone (E.164 without +)
+ * @param {string}   templateName   Template name registered in Meta Business Manager
+ * @param {string[]} bodyParams     Ordered list of values for body placeholders {{1}}, {{2}}, ...
+ * @param {string}   languageCode   BCP-47 language tag (defaults to env.WA_RATE_TEMPLATE_LANG)
+ */
+const sendTemplateMessage = async (to, templateName, bodyParams = [], languageCode) => {
+  const lang = languageCode || env.WA_RATE_TEMPLATE_LANG || "en";
+  const payload = {
+    messaging_product: "whatsapp",
+    to,
+    type: "template",
+    template: {
+      name: templateName,
+      language: { code: lang },
+      components: [
+        {
+          type: "body",
+          parameters: bodyParams.map((v) => ({ type: "text", text: String(v ?? "") })),
+        },
+      ],
+    },
+  };
+
+  try {
+    const res = await getWaApi().post("/messages", payload);
+    logger.debug(`[WA] Template '${templateName}' sent to ${to}: ${res.data.messages?.[0]?.id}`);
+    return res.data;
+  } catch (err) {
+    const data = err.response?.data;
+    logger.error(`[WA] sendTemplate '${templateName}' FAILED to ${to}:`, data || err.message);
+    const metaErr = data?.error || {};
+    const wrapped = new Error(metaErr.message || err.message);
+    wrapped.code = metaErr.code;
+    wrapped.subcode = metaErr.error_subcode;
+    wrapped.details = metaErr;
+    throw wrapped;
+  }
+};
+
 // ──────────────────── Media download ────────────────────
 
 const downloadMedia = async (mediaId) => {
@@ -208,6 +252,7 @@ module.exports = {
   sendTextMessage,
   sendMediaMessage,
   sendButtonMessage,
+  sendTemplateMessage,
   downloadMedia,
   markAsRead,
   parseWebhookPayload,
