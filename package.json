@@ -5,7 +5,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
-    "seed": "node src/scripts/seed.js"
+    "seed": "node src/scripts/seed.js",
+    "migrate:contact-phones": "node src/scripts/backfill-contact-phones.js",
+    "migrate:fix-client-firebaseuid": "node src/scripts/fix-client-firebaseuid-index.js"
   },
   "keywords": [],
   "author": "",
