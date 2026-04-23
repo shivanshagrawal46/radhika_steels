@@ -3,11 +3,11 @@ const mongoose = require("mongoose");
 const clientSchema = new mongoose.Schema(
   {
     // ── Auth ──
+    // Note: uniqueness is enforced via a partial index declared below,
+    // so multiple clients without a firebaseUid don't collide on `null`.
     firebaseUid: {
       type: String,
-      sparse: true,
-      unique: true,
-      default: null,
+      trim: true,
     },
     phone: {
       type: String,
@@ -108,5 +108,18 @@ clientSchema.index({ approvalStatus: 1, createdAt: -1 });
 clientSchema.index({ approvalStatus: 1, isProfileComplete: 1 });
 clientSchema.index({ approvalStatus: 1, isBlocked: 1 });
 clientSchema.index({ firmName: "text", name: "text", gstNumber: "text" });
+
+// Partial unique index on firebaseUid: only enforces uniqueness for docs
+// where firebaseUid is a real non-empty string. Docs without the field
+// (or with null/empty) are simply not indexed — so they never collide.
+clientSchema.index(
+  { firebaseUid: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      firebaseUid: { $type: "string", $gt: "" },
+    },
+  }
+);
 
 module.exports = mongoose.model("Client", clientSchema);
