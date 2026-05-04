@@ -51,7 +51,7 @@ const logger = require("../config/logger");
 const env = require("../config/env");
 
 // ── Tunables ────────────────────────────────────────────────────────────────
-const MAX_REFUSALS_PER_CONVERSATION = 2;          // 3rd negotiation push → silent
+const MAX_REFUSALS_PER_CONVERSATION = 10;         // 11th negotiation push → silent (employee takes over)
 const FOLLOWUP_DELAY_MS = 10 * 60 * 1000;          // 10 minutes after read
 const VERIFY_CONFIDENCE_THRESHOLD = 0.85;          // GPT verify must be ≥ this
 const SCHEDULER_INTERVAL_MS = 60 * 1000;           // poll every 60 seconds

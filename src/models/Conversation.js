@@ -75,7 +75,8 @@ const conversationSchema = new mongoose.Schema(
       negotiation: {
         // # of polite refusals AI has sent in this conversation. Hard cap
         // is enforced in negotiationService.MAX_REFUSALS_PER_CONVERSATION
-        // (currently 2) — beyond that we stay silent + notify dashboard.
+        // (currently 10) — beyond that we stay silent + notify dashboard
+        // so the employee takes over.
         refusalCount: { type: Number, default: 0 },
         // The Message ObjectId of the latest AI refusal — used to (a) match
         // the 'read' status update so we know exactly when to schedule the
