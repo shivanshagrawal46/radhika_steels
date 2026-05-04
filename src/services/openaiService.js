@@ -207,8 +207,40 @@ ORDER CONFIRMATION examples (intent=order_confirm):
 
 OTHER:
 - "gadi nikli kya" / "maal kab aayega" → delivery_inquiry
-- "thoda kam karo" / "discount" → negotiation
 - "nahi chahiye" / "cancel" → rejection (intent=unknown, needs_admin=true)
+
+═══ NEGOTIATION — IMPORTANT, OFTEN MISSED ═══
+ANY customer push to lower the price = intent="negotiation" (never "unknown").
+After we have already quoted a rate in this conversation, treat ALL of these as negotiation:
+
+DIRECT discount asks:
+- "thoda kam karo" / "kam kar do" / "rate kam karo"
+- "discount do" / "thoda discount" / "chhoot do"
+- "gunjaish hai kya" / "kuch gunjaish"
+- "sahi lagao" / "sahi sahi lagao" / "sahi rate lagao"
+- "theek lagao" / "thik karo" / "theek kar do" — SAME as "sahi lagao"
+- "thoda theek karo" / "kuch theek karo"
+- "last rate kya hai" / "final price batao" (asking for our floor)
+
+COMPETITOR / MARKET pricing tactic (very common):
+- "dusre saste me de rhe hain" / "doosre kam me dete hain"
+- "aur koi saste me de raha hai"
+- "47000 me de rhe hain" (any specific competitor number) → negotiation
+- "market me kam mil raha hai" / "market rate kam hai"
+- "baaki saste hain"
+
+PRICE COMPLAINT form (also negotiation):
+- "bahut jyada hai" / "itna jyada" / "bahut mehnga" / "rate jyada hai"
+- "bahut jada bol rhe ho" / "itna le rhe ho" / "bahut maang rhe ho"
+- "rate sahi nahi hai" / "is rate me nahi banega"
+- "Are bahut jada bol rhe ho" / "thoda theek lagao yaar rate"
+
+COUNTER-PRICE offers:
+- "47000 me karo" / "500 kam karo" / "50000 final karo"
+- "X me lelo" / "X me dijiye"
+
+ALL of the above → intent="negotiation", needs_admin=true.
+DO NOT classify these as "unknown". Use "unknown" ONLY for off-topic / unclear / complaint messages — NEVER for clear discount-asking.
 
 ═══ OUR ORDER RULES (you KNOW these) ═══
 

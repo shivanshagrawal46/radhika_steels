@@ -831,6 +831,24 @@ const NEGOTIATION_REGEX = new RegExp(
     "\\b(?:itna|bahut|jyada|zyada)\\s*(?:mehnga|mehanga|expensive|costly)\\b",
     // "thoda discount" / "kuch chhoot"
     "\\b(?:thoda|kuch|kchh)\\s*(?:discount|chhoot|chhut|छूट)\\b",
+    // "theek/thik lagao" / "thik kar do" / "theek karo" — synonym of "sahi lagao".
+    // Customer asking us to "settle the rate properly".
+    "\\b(?:theek|thik|theekh|teek|theke)\\s*(?:lagao|laga\\s*do|lagado|lagaiye|kar\\s*do|kardo|karo|krdo|krna)\\b",
+    // "thoda theek karo" / "kuch theek karo" — soft form
+    "\\b(?:thoda|kuch|aur)\\s*(?:theek|thik|theekh|teek)\\s*(?:karo|kar\\s*do|kardo|krdo|lagao|laga\\s*do|lagado)\\b",
+    // Competitor pricing tactic: "doosre / dusre / aur koi / baki saste / kam de rhe"
+    "\\b(?:doosr[ae]|dusr[ae]|aur\\s*koi|koi\\s*aur|baki|baaki|baqi)\\s*(?:to|toh)?\\s*(?:saste|sasti|kam|km|cheap|chhota|chota)\\b",
+    // "saste me de rhe / dete / mil rha" — competitor reference
+    "\\b(?:saste|sasti|kam|km)\\s*(?:me|mein)\\s*(?:de|dete|deta|de\\s*rh[ae]|de\\s*raha|de\\s*rahe|de\\s*rahi|mil|milta|milte|mil\\s*rh[ae]|mil\\s*raha|mil\\s*rahe|de\\s*dete)\\b",
+    // "X (3-7 digit) me de rhe hain" — competitor's specific quoted number
+    "\\b\\d{3,7}\\s*(?:k|hzr|hazaar)?\\s*(?:me|mein|par|pe|pr)\\s*(?:de|dete|deta|de\\s*rh[ae]|de\\s*rahe|de\\s*raha|mil|milta|mil\\s*rh[ae]|mil\\s*rahe)\\b",
+    // "market me kam / saste / cheap" — market-rate comparison
+    "\\bmarket\\s*(?:me|mein|main)?\\s*(?:kam|saste|sasti|cheap|down|girab|niche)\\b",
+    // "bahut jada / itna jyada bol/le/maang rhe ho" — "you're charging too much"
+    "\\b(?:bahut|itna|kafi|kaafi)\\s*(?:jada|jyada|zyada|jyaada)\\s*(?:bol|bata|le|leta|lete|maang|charge|laga)\\b",
+    // "rate jyada hai" / "rate bahut jyada hai" / "price kafi mehnga hai"
+    // Allows optional intensifier ("bahut", "kafi") before "jyada/mehnga".
+    "\\b(?:rate|price|bhav|daam|daamn?)\\s*(?:bahut|itna|kafi|kaafi|thoda)?\\s*(?:jada|jyada|zyada|jyaada|mehnga|mehanga|expensive|costly|high)\\s*(?:hai|h|hain|he|chal\\s*rh[ae]|chal\\s*rahe)?\\b",
   ].join("|"),
   "i"
 );
