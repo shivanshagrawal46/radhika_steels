@@ -56,6 +56,7 @@ const FOLLOWUP_DELAY_MS = 10 * 60 * 1000;          // 10 minutes after read
 const VERIFY_CONFIDENCE_THRESHOLD = 0.85;          // GPT verify must be ≥ this
 const SCHEDULER_INTERVAL_MS = 60 * 1000;           // poll every 60 seconds
 const SCHEDULER_BATCH_LIMIT = 25;                  // max conversations per tick
+const REFUSAL_COOLDOWN_MS = 60 * 1000;             // back-to-back negotiation messages within 60s share ONE refusal
 
 const getIO = () => {
   try {
@@ -67,17 +68,63 @@ const getIO = () => {
 
 // ── 1. Decide + generate the polite refusal ────────────────────────────────
 /**
- * Returns a refusal reply if we are confident this is negotiation AND we
- * haven't exceeded the per-conversation refusal cap. Otherwise returns
- * null and chatService falls through to the existing silent flow.
+ * Returns one of three things:
+ *   • { responseText, usage, responseTimeMs } — refusal ready to send
+ *   • { silent: true }                        — we just sent a refusal a
+ *       few seconds ago (REFUSAL_COOLDOWN_MS); the customer is mid-burst
+ *       (e.g. typed two negotiation messages back-to-back). Caller must
+ *       NOT send anything AND must NOT route to needsAttention either —
+ *       just stay silent and end the request. The scheduler/follow-up
+ *       state is unchanged.
+ *   • null                                    — handler can't take this
+ *       message (cap hit, GPT failure, low confidence). Caller falls
+ *       through to the existing silent flow exactly like before.
  */
 async function tryHandleNegotiation({
   conversation,
   chatHistory,
   skipVerification = false,
 }) {
-  // Refusal-limit gate
   const negCtx = (conversation.context && conversation.context.negotiation) || {};
+
+  // ── Cooldown gate (deduplicate negotiation bursts) ────────────────────
+  // Path 1: in-memory check via context.negotiation.lastRefusalAt — fast,
+  // works for the common case where the previous refusal save has finished
+  // before this message is processed.
+  if (negCtx.lastRefusalAt) {
+    const elapsed = Date.now() - new Date(negCtx.lastRefusalAt).getTime();
+    if (elapsed < REFUSAL_COOLDOWN_MS) {
+      logger.info(
+        `[NEGOTIATION] Cooldown active (${elapsed}ms < ${REFUSAL_COOLDOWN_MS}ms) — ` +
+        `same negotiation burst, staying silent (no double-reply)`
+      );
+      return { silent: true };
+    }
+  }
+  // Path 2: DB-backed safety net — handles the rare race where two webhook
+  // requests interleave so fast that path 1's in-memory state is stale.
+  // Indexed query on (conversation, createdAt) is ~ms-fast.
+  try {
+    const recentRefusal = await Message.findOne({
+      conversation: conversation._id,
+      "sender.type": "ai",
+      "aiMetadata.intent": "negotiation",
+      createdAt: { $gte: new Date(Date.now() - REFUSAL_COOLDOWN_MS) },
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+    if (recentRefusal) {
+      logger.info(
+        `[NEGOTIATION] DB-cooldown active (refusal ${recentRefusal._id} sent ` +
+        `${Date.now() - new Date(recentRefusal.createdAt).getTime()}ms ago) — staying silent`
+      );
+      return { silent: true };
+    }
+  } catch (err) {
+    logger.warn(`[NEGOTIATION] DB cooldown check failed: ${err.message} — proceeding`);
+  }
+
+  // ── Refusal-limit gate ────────────────────────────────────────────────
   const refusalCount = negCtx.refusalCount || 0;
   if (refusalCount >= MAX_REFUSALS_PER_CONVERSATION) {
     logger.info(
@@ -146,8 +193,9 @@ function markRefusalSent(conversation, refusalMessageId) {
   const ctx = conversation.context.negotiation;
   ctx.refusalCount = (ctx.refusalCount || 0) + 1;
   ctx.lastRefusalMessageId = refusalMessageId;
-  ctx.followUpDueAt = null;        // will be set when 'read' status arrives
-  ctx.followUpSent = false;        // fresh follow-up cycle
+  ctx.lastRefusalAt = new Date();   // powers the burst cooldown
+  ctx.followUpDueAt = null;         // will be set when 'read' status arrives
+  ctx.followUpSent = false;         // fresh follow-up cycle
   conversation.markModified("context");
 }
 
@@ -420,4 +468,5 @@ module.exports = {
   stopScheduler,
   MAX_REFUSALS_PER_CONVERSATION,
   FOLLOWUP_DELAY_MS,
+  REFUSAL_COOLDOWN_MS,
 };

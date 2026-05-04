@@ -85,6 +85,12 @@ const conversationSchema = new mongoose.Schema(
           ref: "Message",
           default: null,
         },
+        // Wall-clock time the latest refusal was generated. Used by the
+        // refusal-burst cooldown: if a customer types two negotiation
+        // messages back-to-back ("Are bahut jada bol rhe ho" + "Theek
+        // Lagan"), we only reply to the first one — the second falls within
+        // REFUSAL_COOLDOWN_MS and stays silent so we don't double-reply.
+        lastRefusalAt: { type: Date, default: null },
         // Set to (read-time + 10 min) ONLY when the refusal's WhatsApp status
         // becomes 'read'. Until then this stays null and the scheduler can't
         // pick it up — that's how we enforce "follow up only if seen".

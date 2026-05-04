@@ -914,6 +914,15 @@ const handleIncomingMessage = async (parsed) => {
         chatHistory: negChatHistory,
         skipVerification: true, // parser already extremely confident
       });
+
+      // Cooldown burst — customer typed multiple negotiation messages in
+      // quick succession. We already replied to the first one. Stay
+      // completely silent: no reply, no needsAttention. End the request.
+      if (negResult && negResult.silent) {
+        logger.info(`[CHAT] ─── END from=${from} — SILENT (negotiation cooldown burst) ───`);
+        return;
+      }
+
       if (negResult && negResult.responseText) {
         responseText = negResult.responseText;
         usedGPT = true;
@@ -1147,6 +1156,15 @@ const handleIncomingMessage = async (parsed) => {
                 chatHistory,
                 skipVerification: false, // GPT classify ≠ confirmation; verify again
               });
+
+              // Cooldown burst — same negotiation thread, second message
+              // arrived within REFUSAL_COOLDOWN_MS. Stay completely silent
+              // (no reply, no needsAttention). End the request right here.
+              if (negResult && negResult.silent) {
+                logger.info(`[CHAT] ─── END from=${from} — SILENT (negotiation cooldown burst) ───`);
+                return;
+              }
+
               if (negResult && negResult.responseText) {
                 responseText = negResult.responseText;
                 usedGPT = true;
