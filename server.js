@@ -66,6 +66,17 @@ const startServer = async () => {
       }
     }, RESET_CHECK_INTERVAL);
     logger.info("[BOOT] 12hr auto-reset scheduler started (every 15min)");
+
+    // Negotiation follow-up scheduler — polls every 60s and sends the
+    // 10-min nudge to customers who saw our polite refusal but haven't
+    // booked yet. All gating (read receipt, topic-change cancel, refusal
+    // cap) lives inside negotiationService — see that file for details.
+    try {
+      const negotiationService = require("./src/services/negotiationService");
+      negotiationService.startScheduler();
+    } catch (err) {
+      logger.error(`[BOOT] Negotiation scheduler failed to start: ${err.message}`);
+    }
   });
 
   const shutdown = (signal) => {

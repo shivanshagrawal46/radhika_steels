@@ -775,4 +775,252 @@ If the message doesn't contain billing info (e.g. it's a question or unrelated),
   }
 };
 
-module.exports = { classifyIntent, generateResponse, verifyOrder, extractBillingDetails };
+// ──────────────────────────────────────────────
+// NEGOTIATION — three calls, all separate from the existing classify/order
+// pipeline so they can never affect those flows:
+//   1. verifyNegotiation       — strict yes/no second-opinion gate
+//   2. generateNegotiationReply — composes the polite refusal text
+//   3. generateFollowUpReply   — composes the 10-min nudge after read
+// ──────────────────────────────────────────────
+
+const VERIFY_NEGOTIATION_PROMPT = `You are a binary classifier for a steel-trading WhatsApp chat. Your ONLY job is to decide whether the customer's LAST message is an explicit discount / negotiation request.
+
+═══ A "NEGOTIATION" MESSAGE IS ═══
+The customer is explicitly trying to lower the price after we (or the prior conversation) gave them a rate. Examples:
+- "thoda kam karo" / "kuch kam kar do" / "rate kam karo" / "kam karna padega"
+- "kuch gunjaish hai" / "gunjaish nikalo"
+- "sahi sahi lagao" / "sahi rate lagao" / "sahi rate kar do"
+- "discount do" / "thoda chhoot do" / "छूट दो"
+- "47000 me karo" / "500 kam karo" (explicit counter-price offer)
+- "is rate me nahi ho payega" / "itna mehnga" (rejecting our quoted rate)
+- "thoda toh karo bhai" / "kuch toh kijiye" (begging for a small reduction)
+- "last/final rate batao" right after we gave a rate (asking for our floor)
+
+═══ NOT NEGOTIATION ═══
+- First-time price inquiry: "rate batao", "5.5 ka rate", "hb 12g price", "aaj ka bhav"
+- Order confirmation: "book karo", "5 ton chahiye", "confirm", "pakka karo"
+- Asking about minimum quantity, payment, GST, advance, delivery, billing
+- Complaints about delivery / wrong item / quality
+- Greeting, thanks, follow-up, off-topic chat
+- ANY message that does NOT explicitly push for a lower price
+
+═══ DECISION RULES ═══
+1. Be CONSERVATIVE. If you are NOT sure → is_negotiation=false.
+2. confidence is your real probability. Only return ≥ 0.85 if you would bet money on it.
+3. The customer must have actively ASKED for a price reduction. Reading the rate or asking "kya rate hai" is NOT negotiation.
+4. A wrong "yes" → we send a discount-refusal when none was needed → embarrassing.
+5. A wrong "no" → we stay silent → human handles. SILENT IS ALWAYS SAFE.
+6. Look at the WHOLE recent chat — has a price already been quoted? If no price was ever quoted in this chat, it's almost certainly NOT negotiation; lean towards is_negotiation=false.
+
+Return ONLY the function call.`;
+
+const VERIFY_NEGOTIATION_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "verify_negotiation",
+      description: "Decide whether the customer's last message is a discount/negotiation request",
+      parameters: {
+        type: "object",
+        properties: {
+          is_negotiation: {
+            type: "boolean",
+            description: "true if and only if the customer is explicitly asking for a discount or lower price",
+          },
+          confidence: {
+            type: "number",
+            description: "Your real probability (0.0-1.0). Only ≥ 0.85 will trigger a refusal reply; anything lower stays silent.",
+          },
+          reasoning: {
+            type: "string",
+            description: "One short sentence explaining the decision (for logs)",
+          },
+        },
+        required: ["is_negotiation", "confidence"],
+      },
+    },
+  },
+];
+
+const verifyNegotiation = async (recentMessages) => {
+  const start = Date.now();
+  try {
+    const response = await getClient().chat.completions.create({
+      model: env.OPENAI_MODEL,
+      messages: [
+        { role: "system", content: VERIFY_NEGOTIATION_PROMPT },
+        ...recentMessages,
+      ],
+      tools: VERIFY_NEGOTIATION_TOOLS,
+      tool_choice: { type: "function", function: { name: "verify_negotiation" } },
+      temperature: 0.0,
+      max_tokens: 128,
+    });
+
+    const tc = response.choices[0]?.message?.tool_calls?.[0];
+    let result = null;
+    if (tc?.function?.arguments) {
+      try { result = JSON.parse(tc.function.arguments); } catch { /* parse error */ }
+    }
+    const usage = response.usage || {};
+    logger.info(
+      `[OPENAI] Negotiation verify in ${Date.now() - start}ms, tokens=${usage.total_tokens || 0}, ` +
+      `is_neg=${result?.is_negotiation}, conf=${result?.confidence}`
+    );
+
+    return {
+      result,
+      usage: {
+        promptTokens: usage.prompt_tokens || 0,
+        completionTokens: usage.completion_tokens || 0,
+        totalTokens: usage.total_tokens || 0,
+      },
+      responseTimeMs: Date.now() - start,
+    };
+  } catch (err) {
+    logger.error(`[OPENAI] verifyNegotiation FAILED: ${err.message}`);
+    throw err;
+  }
+};
+
+const NEGOTIATION_REPLY_PROMPT = `You are Rakesh ji, a senior steel trader at Radhika Steel Raipur. A customer is asking you to lower the rate on the steel they are looking to buy. The rate we already gave them is our genuine best — it cannot be lowered.
+
+Your single job: politely refuse, in trader-style language that matches the customer's tone. They must NEVER feel they are talking to a bot.
+
+═══ ABSOLUTE RULES — NEVER VIOLATE ═══
+1. NEVER agree to lower the price. Not even slightly.
+2. NEVER mention any number, amount, ₹ figure, percentage, or discount value.
+3. NEVER say "team se baat karke", "boss se permission lekar", "manager se confirm karke" — YOU are the decision-maker.
+4. NEVER offer anything in exchange (no qty discount, no free freight, no extended credit, no future discount, no "agli baar dekhenge").
+5. NEVER apologize. The price IS fair, period. No "sorry", "afsos", "maaf kijiye", "क्षमा".
+6. NEVER hint at any flexibility — no "agar zyada lo to", "abhi nahi to baad me", "shayad", "dekhte hain".
+7. NEVER reveal you are an AI / system / template. Speak as a human trader.
+8. NEVER ask the customer to send a counter-offer or specify what discount they want.
+
+═══ STYLE — THIS IS THE WHOLE GAME ═══
+- 1-2 short sentences MAX. Real traders are busy.
+- Match the customer's language EXACTLY (Hindi → Hindi, Hinglish → Hinglish, English → English).
+- Use "aap" (respectful), never "tu" / "tum".
+- Sound CONFIDENT and WARM — not defensive, not pleading. You stand behind your rate.
+- Vary your wording — never sound scripted.
+- Indian steel-trader vibe: a little "bhaiya" / "bhai sahab" / "sir" / "boss" is welcome.
+- Keep punctuation natural. Light use of exclamation is fine; emojis only if customer used them first.
+
+═══ TONE EXAMPLES (the FEEL we want — DO NOT copy verbatim) ═══
+- "Bhaiya, sahi rate hi diya hai aapko, bilkul best price hai market me."
+- "Bhai sahab, ye humara final rate hai, ek dam genuine."
+- "Aapko already best rate diya hua hai, niche jaane ka scope nahi hai."
+- "Sir, ye rate humne aap ke liye hi best banaya hai, wahi le lijiye."
+- "Bhaiya, market dekh lo aap, itna sasta rate kahin nahi milega."
+- "Boss, bilkul honest rate diya hai, isi me kaam ho jayega."
+
+═══ WHAT YOU MAY ACKNOWLEDGE (optional, only if it fits naturally) ═══
+- Quality: "quality top class hai", "maal premium hai"
+- Market reality: "aaj kal market me itna sasta nahi milta"
+- Their relationship: "purane customer ho aap" — but ONLY if the prior chat suggests this. Never invent.
+
+Return ONLY the reply text. No JSON, no quotes, no labels, no metadata. Just the message exactly as you would send it on WhatsApp.`;
+
+const generateNegotiationReply = async (recentMessages) => {
+  const start = Date.now();
+  try {
+    const response = await getClient().chat.completions.create({
+      model: env.OPENAI_MODEL,
+      messages: [
+        { role: "system", content: NEGOTIATION_REPLY_PROMPT },
+        ...recentMessages,
+      ],
+      temperature: 0.5,   // small variation so replies don't feel templated
+      max_tokens: 120,
+    });
+
+    const text = (response.choices[0]?.message?.content || "").trim();
+    const usage = response.usage || {};
+    logger.info(
+      `[OPENAI] Negotiation reply in ${Date.now() - start}ms, tokens=${usage.total_tokens || 0}, ` +
+      `len=${text.length}`
+    );
+
+    return {
+      text,
+      usage: {
+        promptTokens: usage.prompt_tokens || 0,
+        completionTokens: usage.completion_tokens || 0,
+        totalTokens: usage.total_tokens || 0,
+      },
+      responseTimeMs: Date.now() - start,
+    };
+  } catch (err) {
+    logger.error(`[OPENAI] generateNegotiationReply FAILED: ${err.message}`);
+    throw err;
+  }
+};
+
+const FOLLOWUP_REPLY_PROMPT = `You are Rakesh ji from Radhika Steel Raipur. About 10 minutes ago, a customer was negotiating for a discount on steel, you politely declined, and they SAW your message. Either they didn't reply, or they only said "ji" / "ok" / "aacha".
+
+Now you are casually following up — a low-pressure nudge to see whether they want to book at the rate you already quoted.
+
+═══ RULES ═══
+1. SHORT — 1 sentence ideally, max 2.
+2. Do NOT bring up the discount or the refusal again. That conversation is done.
+3. Just check if they want to book / how much they need.
+4. NEVER mention any number, ₹ figure, discount, percentage.
+5. NEVER apologize. NEVER beg. Confident, casual.
+6. NEVER mention "10 minutes" or "earlier" or anything that reveals timing logic.
+7. NEVER say you are an AI / system / template.
+8. Match the customer's language (Hindi / Hinglish / English).
+9. Sound like a trader casually following up with a regular customer.
+
+═══ TONE EXAMPLES (do NOT copy verbatim) ═══
+- "Bhaiya, kya socha aapne? Book kar dun?"
+- "Sir, order ka kya socha? Aaj hi finalize kar dijiye."
+- "Bhai sahab, kitna chahiye, bata dijiye, dispatch ka arrange karta hoon."
+- "Bhaiya, aaj ka rate pakka hai. Book karein?"
+- "Sir, confirm kar dun toh maal ready kar deta hoon."
+
+Return ONLY the reply text. No JSON, no quotes, no labels.`;
+
+const generateFollowUpReply = async (recentMessages) => {
+  const start = Date.now();
+  try {
+    const response = await getClient().chat.completions.create({
+      model: env.OPENAI_MODEL,
+      messages: [
+        { role: "system", content: FOLLOWUP_REPLY_PROMPT },
+        ...recentMessages,
+      ],
+      temperature: 0.5,
+      max_tokens: 80,
+    });
+
+    const text = (response.choices[0]?.message?.content || "").trim();
+    const usage = response.usage || {};
+    logger.info(
+      `[OPENAI] Negotiation follow-up reply in ${Date.now() - start}ms, ` +
+      `tokens=${usage.total_tokens || 0}, len=${text.length}`
+    );
+
+    return {
+      text,
+      usage: {
+        promptTokens: usage.prompt_tokens || 0,
+        completionTokens: usage.completion_tokens || 0,
+        totalTokens: usage.total_tokens || 0,
+      },
+      responseTimeMs: Date.now() - start,
+    };
+  } catch (err) {
+    logger.error(`[OPENAI] generateFollowUpReply FAILED: ${err.message}`);
+    throw err;
+  }
+};
+
+module.exports = {
+  classifyIntent,
+  generateResponse,
+  verifyOrder,
+  extractBillingDetails,
+  verifyNegotiation,
+  generateNegotiationReply,
+  generateFollowUpReply,
+};

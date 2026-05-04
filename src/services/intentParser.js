@@ -477,6 +477,38 @@ function parse(text) {
     }
   }
 
+  // 11. NEGOTIATION override — runs LAST so it can supersede whatever the
+  // earlier steps decided. The strong patterns in NEGOTIATION_REGEX (kam
+  // karo / gunjaish / sahi lagao / discount / counter-price …) are clear
+  // discount asks; they should beat any product detection that may have
+  // happened above. Note: "acknowledgment" is NOT overridden — a bare "ok"
+  // shouldn't accidentally trip this branch (none of the patterns match
+  // "ok" anyway, but we double-guard).
+  //
+  // Confidence rule:
+  //   - Pure negotiation message (no fresh product info)         → 0.95
+  //     (parser-confident — chatService skips GPT verify)
+  //   - Negotiation tone PLUS new product info in same message   → 0.82
+  //     (ambiguous — chatService routes through GPT verifyNegotiation)
+  if (result.intent !== "acknowledgment") {
+    const isExplicitNegotiation = NEGOTIATION_REGEX.test(lower);
+    const counterMatch = COUNTER_PRICE_REGEX.exec(lower);
+    const isCounterPrice = counterMatch !== null;
+
+    if (isExplicitNegotiation || isCounterPrice) {
+      const hasNewProductInfo = Boolean(
+        result.size || result.gauge || result.mm || result.inch
+      );
+      result.intent = "negotiation";
+      result.confidence = hasNewProductInfo ? 0.82 : 0.95;
+      if (isCounterPrice) {
+        // Carried only for logging/admin visibility — chatService never uses
+        // this number in any reply (the GPT prompt forbids quoting numbers).
+        result.counterPrice = parseFloat(counterMatch[1]);
+      }
+    }
+  }
+
   return result;
 }
 
@@ -761,6 +793,55 @@ function parseMultiple(text) {
 const ORDER_KEYWORD_REGEX =
   /\b(?:book|booked|booking|confirm|confirmed|pakka|pakki|final|finalize|finalise|order|le\s*lo|lelo|बुक|कन्फर्म|पक्का|आर्डर)\b/i;
 
+// ── Negotiation detection ───────────────────────────────────────────────────
+// STRONG patterns — when one of these matches, the customer is unambiguously
+// asking us to lower the price. Anything subtler (just "thoda dekho", "ho
+// jayega kya") is intentionally NOT here — those go to GPT for verification.
+//
+// Conservative on purpose: we'd rather miss a borderline negotiation (which
+// then falls through to silent → human handles it, same as today) than
+// false-trigger on a fresh price inquiry.
+const NEGOTIATION_REGEX = new RegExp(
+  [
+    // "thoda/kuch/rate/price/bhav kam karo", "rate kam kar do"
+    "\\b(?:thoda|kuch|rate|price|bhav|aur|aree?)\\s*(?:kam|km|kum)(?:\\s*(?:kar(?:o|na)?|kr(?:o|na|do|d?dn?a)?|kardo|kar\\s*do|kr\\s*do))?\\b",
+    // "kam karo" / "km kr do" — standalone verb form
+    "\\b(?:kam|km|kum)\\s*(?:karo|kar\\s*do|kardo|kr\\s*do|kr\\s*na|krdo|krna)\\b",
+    // "gunjaish" — any spelling. Strongest possible negotiation signal in Hindi.
+    "\\b(?:gunjaish|gunjayish|guzaish|gunjaayish|gungaish|gunjaisha)\\b",
+    // "sahi sahi lagao" / "sahi rate lagao" / "sahi kar do"
+    "\\bsahi\\s*(?:sahi)?\\s*(?:lagao|laga\\s*do|lagado|lagaiye|kar\\s*do|kardo|karo|rate)\\b",
+    // discount terms — multilingual
+    "\\b(?:discount|chhoot|chhut|छूट|डिस्काउंट|chhut\\s*do|discount\\s*do|discount\\s*dijiye)\\b",
+    // "thoda toh karo" / "kuch toh kar do" — soft begging form
+    "\\b(?:thoda|kuch|kchh)\\s*(?:toh|to)\\s*(?:karo|kar\\s*do|kardo|kijiye|krdo)\\b",
+    // Devanagari: "थोड़ा कम", "कम करो", "कम कर दो"
+    "थोड़ा\\s*कम|कम\\s*कर(?:ो|दो|ना)?",
+    // Explicit "negotiate" / "bargain" / "mol bhav"
+    "\\b(?:bargain|negotiate|negotiation|mol\\s*bhav|molbhav)\\b",
+    // "sasta karo" / "cheaper karo"
+    "\\b(?:sasta|sasti)\\s*(?:karo|kar\\s*do|kardo|de\\s*do|dijiye|lagao)\\b",
+    // "bhav/rate/price thoda kam" — noun-form (no verb but strong)
+    "\\b(?:bhav|rate|price)\\s*(?:thoda|kuch)?\\s*(?:kam|km|kum)\\b",
+    // "last/final rate/price/bhav <ask-verb>" — asking for our floor
+    "\\b(?:last|final)\\s*(?:price|rate|bhav)\\s*(?:kya|batao|do|de\\s*do|bata|bolo|lagao)\\b",
+    // "is rate me nahi" / "isi rate me nahi" — rejecting our quote
+    "\\b(?:is|isi|ye|yeh|us)\\s*(?:rate|price|bhav)\\s*(?:me|mein|par|pe)\\s*(?:nahi|nai|na|nhi)\\b",
+    // "itna mehnga" / "bahut mehnga"
+    "\\b(?:itna|bahut|jyada|zyada)\\s*(?:mehnga|mehanga|expensive|costly)\\b",
+    // "thoda discount" / "kuch chhoot"
+    "\\b(?:thoda|kuch|kchh)\\s*(?:discount|chhoot|chhut|छूट)\\b",
+  ].join("|"),
+  "i"
+);
+
+// Counter-price offer: customer proposes a specific price.
+// Examples: "47000 me karo", "500 kam karo", "47k par karo", "50000 final karo".
+// We require a 3+ digit number followed by a "me/par/pe karo/lagao" phrase
+// so plain numbers ("5") can't trigger this.
+const COUNTER_PRICE_REGEX =
+  /\b(\d{3,7})\s*(?:k|hzr|hazaar)?\s*(?:me|mein|par|pe|pr)\s*(?:karo|kar\s*do|kardo|lagao|laga\s*do|de\s*do|dijiye|final\s*karo)\b/i;
+
 module.exports = {
   parse,
   parseMultiple,
@@ -771,4 +852,6 @@ module.exports = {
   ALL_HB_GAUGES,
   HB_MM_RANGES,
   ORDER_KEYWORD_REGEX,
+  NEGOTIATION_REGEX,
+  COUNTER_PRICE_REGEX,
 };

@@ -67,6 +67,34 @@ const conversationSchema = new mongoose.Schema(
         unit: { type: String, default: "" },
       },
       deliveryInquiry: { type: Boolean, default: false },
+      // ── Negotiation flow tracking (added for AI negotiator). All four
+      // fields are written by negotiationService and read by both the
+      // scheduler and chatService. Old conversations created before this
+      // schema landed will simply have an empty `negotiation` subdoc and
+      // every default below applies — fully backwards-compatible.
+      negotiation: {
+        // # of polite refusals AI has sent in this conversation. Hard cap
+        // is enforced in negotiationService.MAX_REFUSALS_PER_CONVERSATION
+        // (currently 2) — beyond that we stay silent + notify dashboard.
+        refusalCount: { type: Number, default: 0 },
+        // The Message ObjectId of the latest AI refusal — used to (a) match
+        // the 'read' status update so we know exactly when to schedule the
+        // follow-up, and (b) fetch the refusal back when the scheduler runs.
+        lastRefusalMessageId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Message",
+          default: null,
+        },
+        // Set to (read-time + 10 min) ONLY when the refusal's WhatsApp status
+        // becomes 'read'. Until then this stays null and the scheduler can't
+        // pick it up — that's how we enforce "follow up only if seen".
+        followUpDueAt: { type: Date, default: null },
+        // Flipped to true the moment the scheduler claims this conversation
+        // (atomic findOneAndUpdate) so the same follow-up can never fire
+        // twice. Also flipped to true by the cancel logic in chatService
+        // when the customer changes topic before the follow-up fires.
+        followUpSent: { type: Boolean, default: false },
+      },
       metadata: {
         type: Map,
         of: mongoose.Schema.Types.Mixed,
@@ -115,6 +143,13 @@ conversationSchema.index({ assignedTo: 1, status: 1 });
 conversationSchema.index({ user: 1, status: 1 });
 conversationSchema.index({ unreadCount: -1, lastMessageAt: -1 });
 conversationSchema.index({ needsAttention: 1, needsAttentionAt: -1 });
+// Negotiation follow-up scheduler index — sparse so it only stores docs
+// that actually have a due date set (the vast majority of conversations
+// will have followUpDueAt=null and be skipped from the index entirely).
+conversationSchema.index(
+  { "context.negotiation.followUpDueAt": 1, "context.negotiation.followUpSent": 1 },
+  { sparse: true }
+);
 
 conversationSchema.virtual("messages", {
   ref: "Message",

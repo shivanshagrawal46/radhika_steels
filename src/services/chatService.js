@@ -8,6 +8,7 @@ const openaiService = require("./openaiService");
 const pricingService = require("./pricingService");
 const responseBuilder = require("./responseBuilder");
 const intentParser = require("./intentParser");
+const negotiationService = require("./negotiationService");
 const { resolveDisplayName } = require("./contactsService");
 const env = require("../config/env");
 const logger = require("../config/logger");
@@ -702,6 +703,11 @@ const handleIncomingMessage = async (parsed) => {
   conversation.context.lastIntent = parsedIntent.intent;
   conversation.markModified("context");
 
+  // 7c. Cancel pending negotiation follow-up if customer changed topic.
+  // Acknowledgments / further negotiation pushes do NOT cancel — those are
+  // part of the same negotiation thread. (No-op if no pending follow-up.)
+  negotiationService.cancelFollowUpIfTopicChanged(conversation, parsedIntent);
+
   // 8. Update conversation metadata
   conversation.messageCount += 1;
   conversation.unreadCount += 1;
@@ -884,6 +890,41 @@ const handleIncomingMessage = async (parsed) => {
       });
       logger.info(`[CHAT] ─── END from=${from} — SILENT (delivery, no DB data) ───`);
       return;
+    }
+  }
+
+  // ─── LAYER 2c: NEGOTIATION fast path ───
+  // Fires when our regex parser is highly confident the message is a discount
+  // request (>= 0.95 — pure "kam karo / gunjaish / sahi lagao" with no fresh
+  // product info). We skip the GPT verify_negotiation second-opinion call
+  // since the regex is unambiguous. negotiationService.tryHandleNegotiation()
+  // still enforces the per-conversation refusal cap and returns null when
+  // exceeded — in which case we fall through to existing Layer 3 (which
+  // will likely hit the silent path, exactly as the user wanted).
+  if (!responseText && parsedIntent.intent === "negotiation" && parsedIntent.confidence >= 0.95) {
+    try {
+      const recentMsgs = await Message.find({ conversation: conversation._id, isDeleted: false })
+        .sort({ createdAt: -1 }).limit(7).lean();
+      const negChatHistory = recentMsgs.reverse().map((m) => ({
+        role: m.sender.type === "user" ? "user" : "assistant",
+        content: m.content.text || `[${m.content.mediaType}]`,
+      }));
+      const negResult = await negotiationService.tryHandleNegotiation({
+        conversation,
+        chatHistory: negChatHistory,
+        skipVerification: true, // parser already extremely confident
+      });
+      if (negResult && negResult.responseText) {
+        responseText = negResult.responseText;
+        usedGPT = true;
+        aiUsage.totalTokens += (negResult.usage?.totalTokens || 0);
+        responseTimeMs += (negResult.responseTimeMs || 0);
+        logger.info(`[CHAT] L2c Negotiation (regex high-conf) handled — refusalCount will be ${(conversation.context?.negotiation?.refusalCount || 0) + 1}`);
+      } else {
+        logger.info(`[CHAT] L2c Negotiation handler declined (cap or GPT failure) — falling through to L3`);
+      }
+    } catch (err) {
+      logger.warn(`[CHAT] L2c Negotiation handler error: ${err.message}`);
     }
   }
 
@@ -1091,6 +1132,37 @@ const handleIncomingMessage = async (parsed) => {
             }
           }
 
+          // ── NEGOTIATION (GPT-driven path) ──
+          // GPT classifyIntent flagged this as negotiation (which the existing
+          // prompt routes via needs_admin=true → silent). Before we go silent,
+          // give the negotiation handler a chance: it runs a STRICT second-
+          // opinion verify_negotiation call and only proceeds if confidence
+          // ≥ 0.85. If anything is off (cap hit, low confidence, GPT failure)
+          // the handler returns null and we fall through to the existing
+          // silent flow exactly as before.
+          if (!responseText && classified.intent === "negotiation") {
+            try {
+              const negResult = await negotiationService.tryHandleNegotiation({
+                conversation,
+                chatHistory,
+                skipVerification: false, // GPT classify ≠ confirmation; verify again
+              });
+              if (negResult && negResult.responseText) {
+                responseText = negResult.responseText;
+                usedGPT = true;
+                aiUsage.totalTokens += (negResult.usage?.totalTokens || 0);
+                responseTimeMs += (negResult.responseTimeMs || 0);
+                // Tag intent so aiMetadata gets stamped correctly downstream
+                parsedIntent.intent = "negotiation";
+                logger.info(`[CHAT] L3 Negotiation handler responded`);
+              } else {
+                logger.info(`[CHAT] L3 Negotiation handler declined — falling through to silent`);
+              }
+            } catch (err) {
+              logger.warn(`[CHAT] L3 Negotiation handler error: ${err.message}`);
+            }
+          }
+
           // If GPT says needs_admin → DON'T reply, just notify dashboard
           if (!responseText && classified.needs_admin) {
             logger.info(`[CHAT] AI can't answer — staying silent, notifying dashboard`);
@@ -1177,6 +1249,14 @@ const handleIncomingMessage = async (parsed) => {
       detectedAction: parsedIntent.intent,
     },
   });
+
+  // 12b. Negotiation refusal bookkeeping — stamp the conversation so the
+  // 10-min follow-up scheduler can find this message later. Only fires when
+  // the message we just saved IS the negotiation refusal (intent stamped
+  // by the L2c / L3 negotiation handler above).
+  if (parsedIntent.intent === "negotiation") {
+    negotiationService.markRefusalSent(conversation, aiMsg._id);
+  }
 
   conversation.messageCount += 1;
   conversation.lastMessage = {
@@ -1333,6 +1413,11 @@ const handleStatusUpdate = async (parsed) => {
       deliveredAt: message.deliveredAt,
       readAt: message.readAt,
     });
+
+    // Negotiation hook: when a refusal becomes 'read' (blue tick), this
+    // schedules the 10-min follow-up. Internally idempotent + filtered to
+    // negotiation messages only — completely silent for everything else.
+    negotiationService.onMessageStatusUpdate({ message, status });
   }
 };
 
