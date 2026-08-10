@@ -67,6 +67,20 @@ const conversationSchema = new mongoose.Schema(
         unit: { type: String, default: "" },
       },
       deliveryInquiry: { type: Boolean, default: false },
+      // ── Order held while we collect billing details ──
+      // A customer's FIRST order is not written to the Order collection until
+      // we have their firm name (we can't raise a bill without it). The
+      // verified items wait here in the meantime, and the order is created
+      // the moment the details arrive. `askedAt` bounds how long we're
+      // willing to resume — a day-old hold is re-confirmed instead.
+      pendingOrder: {
+        items: { type: [mongoose.Schema.Types.Mixed], default: undefined },
+        customerNote: { type: String, default: "" },
+        askedAt: { type: Date, default: null },
+      },
+      // How many times we've asked for the firm name in this hold. Capped so
+      // a customer who keeps replying with something else gets a human.
+      billingAskCount: { type: Number, default: 0 },
       // ── Negotiation flow tracking (added for AI negotiator). All four
       // fields are written by negotiationService and read by both the
       // scheduler and chatService. Old conversations created before this

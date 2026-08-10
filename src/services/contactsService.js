@@ -447,7 +447,10 @@ const getOrdersByPhone = async (phone, { page = 1, limit = 20, status } = {}) =>
   if (!phone) throw new AppError("phone is required", 400);
   const normalized = canonicalizePhone(phone);
 
-  const user = await User.findOne({ $or: [{ phone: normalized }, { waId: normalized }] }).lean();
+  const [user, client] = await Promise.all([
+    User.findOne({ $or: [{ phone: normalized }, { waId: normalized }] }).lean(),
+    Client.findOne({ phone: normalized }, { firmName: 1, gstNumber: 1 }).lean(),
+  ]);
   if (!user) {
     return { data: [], pagination: { page, limit, total: 0, totalPages: 0 } };
   }
@@ -469,6 +472,12 @@ const getOrdersByPhone = async (phone, { page = 1, limit = 20, status } = {}) =>
       .lean(),
     Order.countDocuments(query),
   ]);
+
+  // Same `billing` block the order:* events carry, so an order card renders
+  // identically on this screen. Lazy require — orderService imports this module.
+  const { buildBilling } = require("./orderService");
+  const billing = buildBilling(user, client);
+  for (const o of orders) o.billing = billing;
 
   return {
     data: orders,

@@ -43,6 +43,20 @@ const istDateKey = (d) => {
   } catch { return ""; }
 };
 
+// "02.07.2026" — DD.MM.YYYY in IST, the form used on booking confirmations
+const formatIstDateNumeric = (d = new Date()) => {
+  try {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone: IST_TZ,
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    }).formatToParts(new Date(d));
+    const lookup = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+    return `${lookup.day}.${lookup.month}.${lookup.year}`;
+  } catch { return ""; }
+};
+
 // "17th April, 2026" — ordinal IST date for user-facing templates
 const MONTHS = ["January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December"];
@@ -80,5 +94,6 @@ module.exports = {
   formatIstTime,
   formatIstDateTime,
   formatIstDateOrdinal,
+  formatIstDateNumeric,
   istDateKey,
 };

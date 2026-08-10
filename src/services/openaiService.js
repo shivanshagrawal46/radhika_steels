@@ -776,10 +776,25 @@ const extractBillingDetails = async (userMessage) => {
         {
           role: "system",
           content: `Extract the firm name and GST number from the customer's message. The customer is a steel buyer in India.
+
+We JUST asked them for their firm name (mandatory) and GST number (optional), so a
+short bare reply is almost always the firm name itself.
+- "Radhika Traders" / "Shree Balaji Steel" / "M/s Verma Hardware" → firm_name
+- "Radhika Traders, 22AAAAA0000A1Z5" → firm_name AND gst_no
+- Drop leading labels: "firm name - Radhika Traders" → firm_name="Radhika Traders"
+- Keep the trade name only; strip trailing addresses ("Radhika Traders, Raipur" → "Radhika Traders")
+
 GST numbers are 15 characters: 2 digits (state) + 10 chars (PAN) + 1 digit + 1 letter + 1 checksum.
-Example: "27AABCU9603R1ZM"
-The customer may send them in one message or separately. Extract whatever is available.
-If the message doesn't contain billing info (e.g. it's a question or unrelated), set has_details=false.`,
+Example: "27AABCU9603R1ZM". Customers may write it with spaces — return it without spaces.
+The customer may send firm name and GST in one message or separately. Extract whatever is available.
+
+GST is optional, so a customer may decline it: "GST nahi hai", "no gst", "bina gst",
+"GST baad me bhejta hoon". Leave gst_no empty for those — and do NOT read the
+sentence itself as a firm name.
+
+Set has_details=false when the message carries NO billing info at all — e.g. it's a
+question ("kitna hua?"), a rate/delivery query, a greeting, or an acknowledgment ("ji", "ok").
+Never invent a firm name from such a message.`,
         },
         { role: "user", content: userMessage },
       ],

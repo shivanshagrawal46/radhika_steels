@@ -1,26 +1,46 @@
-const { Order, Conversation, Contact } = require("../models");
+const { Order, Conversation, Contact, Client } = require("../models");
 const AppError = require("../utils/AppError");
 const logger = require("../config/logger");
 const { resolveDisplayName } = require("./contactsService");
 
+/**
+ * Billing identity for the invoice. Deliberately kept separate from
+ * `displayName`: that one prefers the phonebook name an admin saved for the
+ * number and can be anything ("Ramesh bhai Raipur"), whereas these are the
+ * details the customer gave us to bill against.
+ *
+ * `User` wins over the app `Client` profile because both the WhatsApp billing
+ * flow and the admin's party editor write to `User`, so it's the fresher copy.
+ */
+function buildBilling(user, client) {
+  return {
+    firmName: user?.firmName || client?.firmName || "",
+    gstNo: user?.gstNo || client?.gstNumber || "",
+    billName: user?.billName || "",
+  };
+}
+
 // Decorate a single plain (lean) order object with a resolved `displayName`
-// so admin-frontend never has to pick between name/partyName/firmName/...
-// Fetches at most one `Contact` query per call (batched caller-side).
-async function attachDisplayNameToOrder(order) {
+// plus the `billing` block, so admin-frontend never has to pick between
+// name/partyName/firmName/... or go fetch the customer separately.
+async function attachCustomerInfoToOrder(order) {
   if (!order) return order;
   const phone = order?.user?.phone || order?.user?.waId;
   let contacts = [];
+  let client = null;
   if (phone) {
-    contacts = await Contact.find({ phone })
-      .sort({ updatedAt: -1 })
-      .lean();
+    [contacts, client] = await Promise.all([
+      Contact.find({ phone }).sort({ updatedAt: -1 }).lean(),
+      Client.findOne({ phone }, { firmName: 1, gstNumber: 1 }).lean(),
+    ]);
   }
   order.displayName = resolveDisplayName({ user: order.user, contacts }) || phone || "";
+  order.billing = buildBilling(order.user, client);
   return order;
 }
 
-// Batched version: fetches Contacts once for many orders.
-async function attachDisplayNameToOrders(orders) {
+// Batched version: one Contact query and one Client query for many orders.
+async function attachCustomerInfoToOrders(orders) {
   if (!Array.isArray(orders) || orders.length === 0) return orders;
   const phones = new Set();
   for (const o of orders) {
@@ -28,20 +48,31 @@ async function attachDisplayNameToOrders(orders) {
     if (ph) phones.add(ph);
   }
   if (phones.size === 0) {
-    for (const o of orders) o.displayName = "";
+    for (const o of orders) {
+      o.displayName = "";
+      o.billing = buildBilling(o?.user, null);
+    }
     return orders;
   }
-  const contacts = await Contact.find({ phone: { $in: Array.from(phones) } })
-    .sort({ updatedAt: -1 })
-    .lean();
-  const map = {};
+
+  const phoneList = Array.from(phones);
+  const [contacts, clients] = await Promise.all([
+    Contact.find({ phone: { $in: phoneList } }).sort({ updatedAt: -1 }).lean(),
+    Client.find({ phone: { $in: phoneList } }, { phone: 1, firmName: 1, gstNumber: 1 }).lean(),
+  ]);
+
+  const contactsByPhone = {};
   for (const c of contacts) {
-    if (!map[c.phone]) map[c.phone] = [];
-    map[c.phone].push(c);
+    if (!contactsByPhone[c.phone]) contactsByPhone[c.phone] = [];
+    contactsByPhone[c.phone].push(c);
   }
+  const clientByPhone = {};
+  for (const c of clients) clientByPhone[c.phone] = c;
+
   for (const o of orders) {
     const ph = o?.user?.phone || o?.user?.waId || "";
-    o.displayName = resolveDisplayName({ user: o.user, contacts: map[ph] || [] }) || ph || "";
+    o.displayName = resolveDisplayName({ user: o.user, contacts: contactsByPhone[ph] || [] }) || ph || "";
+    o.billing = buildBilling(o?.user, clientByPhone[ph] || null);
   }
   return orders;
 }
@@ -91,7 +122,7 @@ const getOrderById = async (orderId) => {
     .lean();
 
   if (!order) throw new AppError("Order not found", 404);
-  await attachDisplayNameToOrder(order);
+  await attachCustomerInfoToOrder(order);
   return withPaymentSummary(order);
 };
 
@@ -170,14 +201,14 @@ const getOrdersByUser = async (userId, page = 1, limit = 20) => {
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate("user", "name phone company partyName firmName contactName waId")
+      .populate("user", "name phone company city partyName firmName billName gstNo contactName waId")
       .populate("items.product", "name category")
       .populate("assignedTo", "name")
       .lean(),
     Order.countDocuments({ user: userId }),
   ]);
 
-  await attachDisplayNameToOrders(orders);
+  await attachCustomerInfoToOrders(orders);
   return { orders: orders.map(withPaymentSummary), total, page, totalPages: Math.ceil(total / limit) };
 };
 
@@ -190,13 +221,13 @@ const getOrdersByStatus = async (status, page = 1, limit = 20) => {
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
-      .populate("user", "name phone company partyName firmName contactName waId")
+      .populate("user", "name phone company city partyName firmName billName gstNo contactName waId")
       .populate("assignedTo", "name")
       .lean(),
     Order.countDocuments(filter),
   ]);
 
-  await attachDisplayNameToOrders(orders);
+  await attachCustomerInfoToOrders(orders);
   return { orders: orders.map(withPaymentSummary), total, page, totalPages: Math.ceil(total / limit) };
 };
 
@@ -220,6 +251,7 @@ module.exports = {
   getOrdersByUser,
   getOrdersByStatus,
   getActiveOrderForUser,
-  attachDisplayNameToOrder,
-  attachDisplayNameToOrders,
+  attachCustomerInfoToOrder,
+  attachCustomerInfoToOrders,
+  buildBilling,
 };

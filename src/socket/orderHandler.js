@@ -57,14 +57,14 @@ module.exports = (io, socket) => {
         createdBy: "employee",
       });
 
-      // Re-read with user populated + attach displayName so the broadcast
-      // carries the same shape as order:list / order:get.
+      // Re-read with user populated + attach displayName/billing so the
+      // broadcast carries the same shape as order:list / order:get.
       const full = await Order.findById(created._id)
-        .populate("user", "name phone company partyName firmName contactName waId")
+        .populate("user", "name phone company city partyName firmName billName gstNo contactName waId")
         .populate("items.product", "name category")
         .populate("assignedTo", "name email")
         .lean();
-      if (full) await orderService.attachDisplayNameToOrder(full);
+      if (full) await orderService.attachCustomerInfoToOrder(full);
 
       io.to("employees").emit("order:new", full || created);
       emitContactForOrder(created);
@@ -322,10 +322,10 @@ module.exports = (io, socket) => {
         Order.find()
           .sort({ createdAt: -1 })
           .limit(10)
-          .populate("user", "name phone partyName firmName contactName waId")
+          .populate("user", "name phone city partyName firmName billName gstNo contactName waId")
           .populate("assignedTo", "name")
           .lean()
-          .then((orders) => orderService.attachDisplayNameToOrders(orders)),
+          .then((orders) => orderService.attachCustomerInfoToOrders(orders)),
         Order.aggregate([
           { $match: { status: { $nin: ["cancelled", "inquiry"] } } },
           { $group: { _id: null, total: { $sum: "$pricing.grandTotal" }, count: { $sum: 1 } } },

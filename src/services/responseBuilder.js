@@ -330,23 +330,44 @@ const priceForItem = async (item) => {
   return null;
 };
 
+// "42911+345+18 % gst = 10mt" — rate components followed by the booked
+// quantity, written the way the owner writes them by hand (plain numbers,
+// no ₹, quantity after the "=" rather than an amount).
+const traderRateLine = (item, price) => {
+  const qty = item.quantity || 0;
+  return (
+    `${Math.round(price.mergedBase)}+${Math.round(price.fixedCharge)}` +
+    `+${price.gstPercent} % gst = ${qty}${item.category === "nails" ? "kg" : "mt"}`
+  );
+};
+
 /**
- * Order confirmation message.
+ * Order confirmation ("Sale booked") message — mirrors the format the owner
+ * sends by hand: date, total quantity, one block per item with its rate
+ * components, the payment figures, the advance terms and the billing firm.
+ *
  * @param {Array} items    order items (each may carry mmRange for HB)
  * @param {Object} opts
- *   @param {string} [opts.orderNumber]  — order #, shown at top if provided
- *   @param {number} [opts.paidAmount]   — total paid so far (₹). Default 0.
+ *   @param {string} [opts.firmName]      — billing firm, shown as "Billing : …"
+ *   @param {string} [opts.gstNo]         — GST, shown under Billing when known
+ *   @param {number} [opts.paidAmount]    — total paid so far (₹). Default 0.
+ *   @param {number} [opts.advanceAmount] — booking advance. Default ADVANCE_AMOUNT.
+ *   @param {Date}   [opts.date]          — booking date. Default now (IST).
  */
 const buildOrderConfirmation = async (items, opts = {}) => {
-  const { orderNumber = null, paidAmount = 0 } = opts;
-
-  let msg = `${BRAND}\n`;
-  msg += `✅ *Order Confirmed*`;
-  if (orderNumber) msg += `\nOrder #: *${orderNumber}*`;
+  const {
+    firmName = "",
+    gstNo = "",
+    paidAmount = 0,
+    advanceAmount = ADVANCE_AMOUNT,
+    date = new Date(),
+  } = opts;
+  const { formatIstDateNumeric } = require("../utils/dateUtils");
 
   let grandTotal = 0;
-  let totalTons = 0;   // sum of ton-based items (wr/hb/binding)
-  let totalKgNails = 0; // nails-only kg total, shown separately
+  let totalTons = 0;    // sum of ton-based items (wr/hb/binding)
+  let totalKgNails = 0; // nails are booked in kg, kept separate
+  const blocks = [];
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -362,51 +383,44 @@ const buildOrderConfirmation = async (items, opts = {}) => {
     const qty = item.quantity || 0;
     // Nails quantities are in kg; everything else is in ton.
     const isNails = item.category === "nails";
-    const tonsForMath = isNails ? qty / 1000 : qty;
-    const itemTotal = Math.round(price.total * tonsForMath);
-    grandTotal += itemTotal;
+    grandTotal += Math.round(price.total * (isNails ? qty / 1000 : qty));
     if (isNails) totalKgNails += qty;
     else totalTons += qty;
 
-    msg += `\n\n▸ *${buildItemLabel(item, price)}*`;
-    msg += `\n${INR(price.mergedBase)} + ${INR(price.fixedCharge)} + ${price.gstPercent}% GST = *${INR(price.total)}/ton*`;
-    if (qty > 0) {
-      if (isNails) {
-        msg += `\n${qty} kg × ${INR(price.total)}/ton = *${INR(itemTotal)}*`;
-      } else {
-        msg += `\n${qty} ton × ${INR(price.total)} = *${INR(itemTotal)}*`;
-      }
-    }
+    blocks.push(`*${buildItemLabel(item, price)}*\n${traderRateLine(item, price)}`);
   }
 
-  msg += `\n\n─────────────────`;
-  // Build the total line — combine ton and kg parts when both are present.
-  const parts = [];
-  if (totalTons > 0) parts.push(`${totalTons} ton`);
-  if (totalKgNails > 0) parts.push(`${totalKgNails} kg nails`);
-  const qtySummary = parts.length ? parts.join(" + ") + " — " : "";
-  msg += `\n*Total: ${qtySummary}${INR(grandTotal)}*`;
+  const totalParts = [];
+  if (totalTons > 0) totalParts.push(`${totalTons} mt`);
+  if (totalKgNails > 0) totalParts.push(`${totalKgNails} kg`);
 
-  // Payment summary — always shows Total / Paid / Remaining.
-  // Advance is flexible — customer can pay any amount (less than, equal to,
-  // or more than the suggested booking amount). We only report actuals here.
+  let msg = `${formatIstDateNumeric(date)}\n`;
+  msg += `Sale booked ✅✅\n`;
+  if (totalParts.length) msg += `*Total ${totalParts.join(" + ")}*\n`;
+  if (blocks.length) msg += `\n${blocks.join("\n\n")}\n`;
+
+  // Payment figures — always Total / Paid / Remaining, reporting actuals only.
   const paid = Math.max(0, Number(paidAmount) || 0);
   const remaining = Math.max(0, grandTotal - paid);
-  msg += `\n\n*Payment:*`;
-  msg += `\nTotal Amount: *${INR(grandTotal)}*`;
-  msg += `\nPaid: *${INR(paid)}*`;
-  msg += `\nRemaining: *${INR(remaining)}*`;
+  msg += `\n*Payment:*\n`;
+  msg += `Total Amount: *${INR(grandTotal)}*\n`;
+  msg += `Paid: *${INR(paid)}*\n`;
+  msg += `Remaining: *${INR(remaining)}*\n`;
 
-  if (paid === 0) {
-    msg += `\n\nBooking ke liye advance bhejiye. Transport aapki taraf se.`;
-    msg += `\n_Advance milte hi dispatch schedule hoga._`;
-  } else if (remaining > 0) {
-    msg += `\n\nBalance *${INR(remaining)}* loading ke time. Transport aapki taraf se.`;
+  // The advance terms line only makes sense while money is still owed.
+  if (remaining > 0) {
+    msg += `\n*🔺 ${Math.round(advanceAmount).toLocaleString("en-IN")} advance payment, remaining after loading immediate (Invoice payment)*\n`;
   } else {
-    msg += `\n\n✅ *Full payment received.* Dispatch ke liye ready.`;
+    msg += `\n✅ *Full payment received.* Dispatch ke liye ready.\n`;
   }
 
-  msg += `\n\n🙏 Dhanyawad!`;
+  if (firmName) {
+    msg += `\nBilling : ${firmName}\n`;
+    if (gstNo) msg += `GST : ${gstNo}\n`;
+  }
+  msg += `\nRadhika steel,raipur\n`;
+  msg += `\n*Dhanyawad*\n`;
+  msg += `\nMaterial and size subject to availability…`;
 
   return msg;
 };
@@ -567,6 +581,54 @@ const buildQuantityAskForItems = (items, userText = "") => {
   }
   return msg;
 };
+
+// ──────────────────────────────────────────────
+// Billing details — asked ONCE, before the customer's first order
+// ──────────────────────────────────────────────
+/**
+ * Ask for billing details while the order is held. Firm name is mandatory
+ * (no bill without it); GST is optional.
+ * @param {Array} items  the held order items — echoed back so the customer
+ *                       knows the order is waiting, not lost
+ * @param {Object} opts
+ *   @param {boolean} [opts.reAsk]  — customer's reply had no firm name in it
+ */
+const buildBillingAsk = (items = [], opts = {}) => {
+  const { reAsk = false } = opts;
+
+  if (reAsk) {
+    let msg = `Sirf *firm name* bata dijiye — order turant confirm kar denge.\n`;
+    msg += `\n_Jaise: "Radhika Traders". GST number optional hai._`;
+    return msg;
+  }
+
+  const list = Array.isArray(items) ? items.filter(Boolean) : [];
+
+  let msg = `${BRAND}\n\n`;
+  msg += `Order confirm karne se pehle billing details chahiye:\n`;
+  msg += `\n▸ *Firm name* — zaroori`;
+  msg += `\n▸ *GST number* — optional (na ho to sirf firm name bhej dijiye)`;
+
+  if (list.length > 0) {
+    msg += `\n\n*Aapka order hold pe hai:*`;
+    for (const it of list) {
+      const qty = it.category === "nails"
+        ? `${it.quantity} kg`
+        : `${it.quantity} ton`;
+      msg += `\n▸ ${itemShortLabel(it)} — *${qty}*`;
+    }
+  }
+
+  msg += `\n\n_Ye sirf ek baar poochhenge — aage ke orders me details save rahengi._`;
+  return msg;
+};
+
+/**
+ * Shown once above the order confirmation, right after we save the details.
+ * Deliberately just an acknowledgement — the confirmation that follows already
+ * echoes the firm name and GST under "Billing :".
+ */
+const buildBillingSavedPrefix = () => `Details save ho gayi 🙏\n\n`;
 
 // ──────────────────────────────────────────────
 // Delivery Info Response (from DB)
@@ -848,6 +910,8 @@ module.exports = {
   buildMinQtyError,
   buildOrderQuantityAsk,
   buildQuantityAskForItems,
+  buildBillingAsk,
+  buildBillingSavedPrefix,
   buildGreeting,
   buildDefaultRatesResponse,
   buildDeliveryResponse,

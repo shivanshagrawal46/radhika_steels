@@ -28,9 +28,19 @@ const env = {
   WA_ACCESS_TOKEN: process.env.WA_ACCESS_TOKEN,
   WA_VERIFY_TOKEN: process.env.WA_VERIFY_TOKEN || "radhika_steels_verify",
   WA_API_VERSION: process.env.WA_API_VERSION || "v21.0",
+  // Approved Utility templates. Must exist and be approved in Meta Business
+  // Manager before first send. "3p" = 3 product lines (9 vars total); "5p"
+  // = 5 product lines (11 vars total). Subscribers are assigned exactly 3
+  // or 5 products and the backend routes to the matching template.
+  WA_RATE_TEMPLATE_3P_NAME: process.env.WA_RATE_TEMPLATE_3P_NAME || "rate_statement_3p",
+  WA_RATE_TEMPLATE_5P_NAME: process.env.WA_RATE_TEMPLATE_5P_NAME || "rate_statement_5p",
+  WA_RATE_TEMPLATE_LANG: process.env.WA_RATE_TEMPLATE_LANG || "en",
+  // Legacy single-template name kept for any callers that still import it.
+  // Safe to remove once nothing references it.
+  WA_RATE_TEMPLATE_NAME: process.env.WA_RATE_TEMPLATE_NAME || "rate_statement_3p",
 
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-  OPENAI_MODEL: process.env.OPENAI_MODEL || "gpt-4o",
+  OPENAI_MODEL: process.env.OPENAI_MODEL || "gpt-4o-mini",
 
   FIREBASE_SERVICE_ACCOUNT_PATH: process.env.FIREBASE_SERVICE_ACCOUNT_PATH || "",
   FIREBASE_PROJECT_ID: process.env.FIREBASE_PROJECT_ID || "",

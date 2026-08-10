@@ -2,7 +2,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const uuidv4 = () => crypto.randomUUID();
-const { User, Conversation, Message, Order, Contact } = require("../models");
+const { User, Client, Conversation, Message, Order, Contact } = require("../models");
 const whatsappService = require("./whatsappService");
 const openaiService = require("./openaiService");
 const pricingService = require("./pricingService");
@@ -10,6 +10,7 @@ const responseBuilder = require("./responseBuilder");
 const intentParser = require("./intentParser");
 const negotiationService = require("./negotiationService");
 const { resolveDisplayName } = require("./contactsService");
+const { buildBilling } = require("./orderService");
 const env = require("../config/env");
 const logger = require("../config/logger");
 const AppError = require("../utils/AppError");
@@ -23,6 +24,11 @@ const STAGE_ORDER = [
 ];
 
 const EMPLOYEE_LOCK_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
+
+// The customer explicitly asked for a rate (as opposed to us inferring one
+// from a stray number in their message).
+const PRICE_KEYWORD_REGEX =
+  /\b(?:rate|rates|price|prices|bhav|भाव|quote|quotation|kya\s*rate|क्या\s*रेट)\b/i;
 
 function canAutoAdvance(currentStage, newStage) {
   return STAGE_ORDER.indexOf(newStage) > STAGE_ORDER.indexOf(currentStage);
@@ -66,6 +72,99 @@ function getDisplayName(user, contacts) {
 }
 
 // ─────────────────────────────────────────────────────
+// BILLING DETAILS — collected ONCE, before the first order
+// ─────────────────────────────────────────────────────
+// We cannot raise a bill without a firm name, so a customer's first order is
+// held (not written to the Order collection) until they give us one. GST is
+// optional. Both land on the User doc, so every later order skips the ask.
+const AWAITING_BILLING_INTENT = "awaiting_billing";
+
+// First ask + re-asks. Once exceeded we stop nagging and hand over to a human.
+const MAX_BILLING_ASKS = 3;
+
+// How long a held order stays resumable. Beyond this the customer confirms
+// again rather than us booking something they asked for yesterday.
+const PENDING_ORDER_TTL_MS = 24 * 60 * 60 * 1000;
+
+// GSTIN: 15 chars — 2-digit state code, 10-char PAN (AAAAA0000A), then entity
+// digit + registration letter + checksum. The last three are left as plain
+// alphanumerics rather than hard-coding the usual 'Z', so the handful of
+// non-standard registrations still validate.
+const GSTIN_REGEX = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]{3}$/;
+
+// A firm name a human would actually have typed. Blocks GPT handing us back a
+// stray number, a single letter, or a whole sentence as a "firm name".
+function isPlausibleFirmName(value) {
+  const name = String(value || "").trim();
+  if (name.length < 3 || name.length > 120) return false;
+  if (!/[a-zA-Z\u0900-\u097F]/.test(name)) return false;   // must have letters
+  if (name.split(/\s+/).length > 10) return false;         // a sentence, not a name
+  return true;
+}
+
+// Accept a GST only when it really looks like a GSTIN — storing a malformed
+// one is worse than storing nothing, since GST is optional anyway.
+function normalizeGstNo(value) {
+  const gst = String(value || "").replace(/[\s-]/g, "").toUpperCase();
+  return GSTIN_REGEX.test(gst) ? gst : "";
+}
+
+/**
+ * Billing details we already hold for this number. The WhatsApp `User` doc is
+ * the source of truth, but a customer who registered on the mobile app typed
+ * theirs into `Client` — backfill from there so we never ask twice for
+ * something they already gave us.
+ */
+async function resolveStoredBilling(user) {
+  if (user.firmName) {
+    return { firmName: user.firmName, gstNo: user.gstNo || "" };
+  }
+
+  try {
+    const phones = [user.phone, user.waId].filter(Boolean);
+    const client = phones.length
+      ? await Client.findOne({ phone: { $in: phones } }, { firmName: 1, gstNumber: 1 }).lean()
+      : null;
+
+    if (client?.firmName) {
+      const updates = { firmName: client.firmName };
+      if (client.gstNumber && !user.gstNo) updates.gstNo = client.gstNumber;
+      await User.updateOne({ _id: user._id }, { $set: updates });
+      Object.assign(user, updates); // rest of this request reads the doc
+      logger.info(`[BILLING] Backfilled firm/GST from app profile for ${user.waId}`);
+      return { firmName: updates.firmName, gstNo: user.gstNo || "" };
+    }
+  } catch (err) {
+    logger.warn(`[BILLING] Client profile lookup failed: ${err.message}`);
+  }
+
+  return { firmName: "", gstNo: user.gstNo || "" };
+}
+
+function clearPendingOrder(conversation) {
+  conversation.context.pendingOrder = { items: [], customerNote: "", askedAt: null };
+  conversation.context.billingAskCount = 0;
+  conversation.markModified("context");
+}
+
+// Go silent and light up the dashboard so an employee picks the chat up.
+async function flagNeedsAttention(conversation, io, { user, from, text, reason, displayName }) {
+  conversation.needsAttention = true;
+  conversation.needsAttentionAt = new Date();
+  conversation.needsAttentionReason = reason;
+  conversation.markModified("context");
+  await conversation.save();
+  io.to("employees").emit("chat:needs_attention", {
+    conversationId: conversation._id.toString(),
+    userId: user._id.toString(),
+    userName: displayName || user.name || from,
+    phone: from,
+    lastMessage: text,
+    reason,
+  });
+}
+
+// ─────────────────────────────────────────────────────
 // ORDER CONFIRMATION HELPER — DB-first, then template
 // ─────────────────────────────────────────────────────
 // Detect whether the customer actually stated a quantity (tons/mt/etc.)
@@ -92,11 +191,10 @@ function userMentionedQuantity(chatHistory, currentText) {
   return QTY_MENTION_REGEX.test(parts.join("\n"));
 }
 
-async function processOrderConfirmation(
-  orderResult, conversation, user, io, from, displayName,
-  chatHistory = null, currentText = ""
-) {
-  const items = orderResult.items.map((i) => {
+// GPT's snake_case order items → the internal shape used by pricing, the
+// confirmation template and the pending-order hold.
+function normalizeOrderItems(rawItems) {
+  return (rawItems || []).map((i) => {
     const isNails = i.category === "nails";
     const rawQty = Number(i.quantity) || 0;
     const rawUnit = String(i.unit || "").toLowerCase();
@@ -127,6 +225,33 @@ async function processOrderConfirmation(
       quantity,
     };
   });
+}
+
+// Category-aware minimum-quantity rule:
+//   • ton items (WR / HB / Binding): MIN_QTY_PER_ITEM (2T) per item,
+//     MIN_QTY_TOTAL (5T) across the sum of ton items.
+//   • Nails: MIN_QTY_NAILS_PER_ITEM (500 kg) per item. No total rule
+//     because nails are billed in kg — the 5T total is only meaningful
+//     for ton-priced lines.
+function violatesMinQty(items) {
+  const tonItems = items.filter((i) => i.category !== "nails");
+  const nailsItems = items.filter((i) => i.category === "nails");
+  const totalTonQty = tonItems.reduce((sum, i) => sum + (i.quantity || 0), 0);
+  const tonBelowMin = tonItems.filter((i) => (i.quantity || 0) < responseBuilder.MIN_QTY_PER_ITEM);
+  const nailsBelowMin = nailsItems.filter((i) => (i.quantity || 0) < responseBuilder.MIN_QTY_NAILS_PER_ITEM);
+
+  return (
+    tonBelowMin.length > 0 ||
+    nailsBelowMin.length > 0 ||
+    (tonItems.length > 0 && totalTonQty < responseBuilder.MIN_QTY_TOTAL)
+  );
+}
+
+async function processOrderConfirmation(
+  orderResult, conversation, user, io, from, displayName,
+  chatHistory = null, currentText = ""
+) {
+  const items = normalizeOrderItems(orderResult.items);
 
   // Guard #1 — any item arrives with no quantity (GPT obeyed our prompt and
   // returned 0 because the customer never stated tons).
@@ -152,26 +277,41 @@ async function processOrderConfirmation(
     return responseBuilder.buildQuantityAskForItems(items);
   }
 
-  // ── Minimum-quantity check (category-aware):
-  //   • ton items (WR / HB / Binding): MIN_QTY_PER_ITEM (2T) per item,
-  //     MIN_QTY_TOTAL (5T) across the sum of ton items.
-  //   • Nails: MIN_QTY_NAILS_PER_ITEM (500 kg) per item. No total rule
-  //     because nails are billed in kg — the 5T total is only meaningful
-  //     for ton-priced lines.
-  const tonItems = items.filter((i) => i.category !== "nails");
-  const nailsItems = items.filter((i) => i.category === "nails");
-  const totalTonQty = tonItems.reduce((sum, i) => sum + (i.quantity || 0), 0);
-  const tonBelowMin = tonItems.filter((i) => (i.quantity || 0) < responseBuilder.MIN_QTY_PER_ITEM);
-  const nailsBelowMin = nailsItems.filter((i) => (i.quantity || 0) < responseBuilder.MIN_QTY_NAILS_PER_ITEM);
-
-  if (
-    tonBelowMin.length > 0 ||
-    nailsBelowMin.length > 0 ||
-    (tonItems.length > 0 && totalTonQty < responseBuilder.MIN_QTY_TOTAL)
-  ) {
+  if (violatesMinQty(items)) {
     return responseBuilder.buildMinQtyError(items);
   }
 
+  // ── BILLING GATE ──
+  // No firm name on file → hold the verified order instead of creating it,
+  // and ask. A confirmation only ever goes out for an order we can invoice.
+  // The hold is resumed in handleBillingReply() once the details arrive.
+  const stored = await resolveStoredBilling(user);
+  if (!stored.firmName) {
+    conversation.context.pendingOrder = {
+      items,
+      customerNote: orderResult.customer_note || "",
+      askedAt: new Date(),
+    };
+    conversation.context.billingAskCount = 1;
+    conversation.context.lastIntent = AWAITING_BILLING_INTENT;
+    conversation.markModified("context");
+    await conversation.save();
+    logger.info(`[BILLING] Order held for ${from} — firm name needed (${items.length} item(s))`);
+    return responseBuilder.buildBillingAsk(items);
+  }
+
+  return createConfirmedOrder({
+    items,
+    customerNote: orderResult.customer_note || "",
+    conversation, user, io, from, displayName,
+  });
+}
+
+// Price, persist and confirm an order whose items have already passed the
+// quantity and billing-details checks.
+async function createConfirmedOrder({
+  items, customerNote = "", conversation, user, io, from, displayName,
+}) {
   // Calculate prices and build order items FIRST
   let grandTotal = 0;
   const orderItems = [];
@@ -228,6 +368,8 @@ async function processOrderConfirmation(
     });
   }
 
+  const billing = buildBilling(user, null);
+
   // Save order to DB FIRST — only send confirmation if DB succeeds
   try {
     const order = await Order.create({
@@ -240,7 +382,7 @@ async function processOrderConfirmation(
       // Required advance (₹50,000) is a constant — do NOT pre-fill here or
       // recordAdvancePayment() will double-count it on the first payment.
       advancePayment: { amount: 0, isPaid: false },
-      notes: orderResult.customer_note || "",
+      notes: customerNote,
     });
 
     // Link order to conversation
@@ -260,6 +402,10 @@ async function processOrderConfirmation(
       displayName: displayName || user.name || from,
       userName: displayName || user.name || from,
       phone: user.phone || user.waId,
+      // Billing identity, separate from displayName (which prefers the
+      // phonebook name an admin saved). Guaranteed to carry a firm name —
+      // the gate above refuses to create the order without one.
+      billing,
     });
 
     // Also refresh unified contacts row in real-time
@@ -270,25 +416,159 @@ async function processOrderConfirmation(
     logger.info(`[ORDER] ${order.orderNumber} created, total=₹${grandTotal}`);
 
     // Only build confirmation text AFTER successful DB save
-    let confirmText = await responseBuilder.buildOrderConfirmation(items, {
-      orderNumber: order.orderNumber,
+    return responseBuilder.buildOrderConfirmation(items, {
+      firmName: billing.firmName,
+      gstNo: billing.gstNo,
       paidAmount: 0,
+      date: order.createdAt,
     });
-
-    // If user doesn't have billing details yet, ask for them
-    const hasBilling = user.firmName || user.gstNo;
-    if (!hasBilling) {
-      confirmText += `\n\nBilling ke liye *firm name* aur *GST number* bata dijiye.`;
-      conversation.context.lastIntent = "billing_details";
-      conversation.markModified("context");
-      await conversation.save();
-    }
-
-    return confirmText;
   } catch (err) {
     logger.error(`[ORDER] DB save failed: ${err.message}`);
     return null;
   }
+}
+
+// Has the customer moved on instead of answering the billing ask? Judged on
+// keywords only — NOT on the sizes/quantities the parser reports, because a
+// GSTIN starts with two digits ("22AAAAA…" parses as WR 22mm) and firm names
+// carry numbers too. Requiring the customer to have actually typed
+// rate/bhav/price keeps a billing reply from being read as a fresh inquiry.
+function isUnrelatedToBillingAsk(parsedIntent, text) {
+  const intent = parsedIntent?.intent;
+  if (intent === "delivery_inquiry" || intent === "negotiation" || intent === "order_inquiry") {
+    return true;
+  }
+  return Boolean(parsedIntent?.category) && PRICE_KEYWORD_REGEX.test(text || "");
+}
+
+/**
+ * The customer is replying to our firm-name/GST ask while their order sits on
+ * hold. Saves whatever we can read, then either creates the held order or
+ * asks once more.
+ *
+ * @returns {null|{responseText?: string, silent?: boolean}}
+ *   null   → not a billing reply, caller runs the normal pipeline
+ *   silent → handled, but nothing to send (chat handed to an employee)
+ */
+async function handleBillingReply({
+  conversation, user, parsedIntent, text, io, from, displayName,
+}) {
+  const pending = conversation.context?.pendingOrder;
+  const items = Array.isArray(pending?.items) ? pending.items : [];
+  const askedAt = pending?.askedAt ? new Date(pending.askedAt).getTime() : 0;
+
+  // Nothing left to resume — the hold vanished (restart mid-flow) or is too old
+  // to book without a fresh confirmation. Drop the gate, treat this as normal.
+  if (items.length === 0 || !askedAt || Date.now() - askedAt > PENDING_ORDER_TTL_MS) {
+    clearPendingOrder(conversation);
+    conversation.context.lastIntent = "";
+    conversation.markModified("context");
+    await conversation.save();
+    logger.info(`[BILLING] Held order missing/expired for ${from} — releasing gate`);
+    return null;
+  }
+
+  // No text to read — usually a photo of a GST certificate or a voice note.
+  // Keep the hold and the gate armed so a later text still resumes the order,
+  // and put it in front of an employee.
+  if (!text || !text.trim()) {
+    await flagNeedsAttention(conversation, io, {
+      user, from, text: text || "[media]", displayName,
+      reason: "Billing details expected — customer sent media instead of text",
+    });
+    logger.info(`[BILLING] ${from} replied with media — employee notified, order still held`);
+    return { silent: true };
+  }
+
+  // Bare "ji" / "ok" carries no details — stay silent and stay on hold rather
+  // than spending an ask on it.
+  if (parsedIntent.intent === "acknowledgment") return { silent: true };
+
+  // Fresh rate/delivery question — answer that instead of repeating ourselves.
+  // The order stays held and the gate re-arms when they confirm again.
+  if (isUnrelatedToBillingAsk(parsedIntent, text)) {
+    conversation.context.lastIntent = "";
+    conversation.markModified("context");
+    await conversation.save();
+    logger.info(`[BILLING] ${from} switched topic (${parsedIntent.intent}) — gate released, order still held`);
+    return null;
+  }
+
+  let firmName = "";
+  let gstNo = "";
+  let billName = "";
+  try {
+    const { result } = await openaiService.extractBillingDetails(text);
+    if (result) {
+      if (isPlausibleFirmName(result.firm_name)) firmName = String(result.firm_name).trim();
+      if (isPlausibleFirmName(result.bill_name)) billName = String(result.bill_name).trim();
+      gstNo = normalizeGstNo(result.gst_no);
+    }
+  } catch (err) {
+    logger.warn(`[BILLING] Extraction failed: ${err.message}`);
+  }
+
+  const updates = {};
+  if (firmName) updates.firmName = firmName;
+  if (billName) updates.billName = billName;
+  if (gstNo && gstNo !== user.gstNo) updates.gstNo = gstNo;
+  if (Object.keys(updates).length > 0) {
+    await updatePartyDetails(user._id, updates);
+    Object.assign(user, updates);
+    io.to("employees").emit("chat:party_updated", { userId: user._id.toString(), updates });
+  }
+
+  // Firm name is the only blocker — a missing GST never holds up the order,
+  // whether they declined it or simply didn't mention it.
+  if (!user.firmName) {
+    const asks = (conversation.context.billingAskCount || 1) + 1;
+    conversation.context.billingAskCount = asks;
+    conversation.markModified("context");
+
+    if (asks > MAX_BILLING_ASKS) {
+      clearPendingOrder(conversation);
+      conversation.context.lastIntent = "";
+      await flagNeedsAttention(conversation, io, {
+        user, from, text, displayName,
+        reason: `Firm name not received after ${MAX_BILLING_ASKS} asks — order not created`,
+      });
+      logger.info(`[BILLING] Ask limit reached for ${from} — handing chat to an employee`);
+      return { silent: true };
+    }
+
+    await conversation.save();
+    logger.info(`[BILLING] No firm name in reply from ${from} — ask ${asks}/${MAX_BILLING_ASKS}`);
+    return { responseText: responseBuilder.buildBillingAsk(items, { reAsk: true }) };
+  }
+
+  // Firm name in hand — create the order we were holding.
+  clearPendingOrder(conversation);
+  conversation.context.lastIntent = "order_confirm";
+  conversation.markModified("context");
+  await conversation.save();
+
+  const confirmText = await createConfirmedOrder({
+    items,
+    customerNote: pending.customerNote || "",
+    conversation, user, io, from, displayName,
+  });
+
+  if (!confirmText) {
+    // Details saved but the order didn't persist — never imply that it exists.
+    await flagNeedsAttention(conversation, io, {
+      user, from, text, displayName,
+      reason: "Order creation failed after billing details were saved",
+    });
+    logger.error(`[BILLING] Held order creation failed for ${from} after saving details`);
+    return { silent: true };
+  }
+
+  logger.info(
+    `[BILLING] Saved for ${from} (firm="${user.firmName}", gst=${user.gstNo || "-"}) — held order created`
+  );
+  return {
+    responseText: responseBuilder.buildBillingSavedPrefix() + confirmText,
+  };
 }
 
 // ─────────────────────────────────────────────────────
@@ -404,8 +684,19 @@ const handleIncomingMessage = async (parsed) => {
   let parsedIntent = intentParser.parse(text);
   logger.info(`[CHAT] L1 Parser: intent=${parsedIntent.intent}, cat=${parsedIntent.category || "-"}, conf=${parsedIntent.confidence}`);
 
-  // 6b. BILLING DETAILS intercept — if AI asked for firm/GST after order confirmation
-  if (conversation.context?.lastIntent === "billing_details" && text && text.trim().length > 0) {
+  // 6b. BILLING GATE — their order is on hold and we asked for firm name / GST.
+  // A non-null result owns the reply for this turn (and owns context.lastIntent,
+  // so the parser's guess must not overwrite it further down).
+  let billingFlow = null;
+  if (conversation.context?.lastIntent === AWAITING_BILLING_INTENT) {
+    billingFlow = await handleBillingReply({
+      conversation, user, parsedIntent, text, io, from, displayName,
+    });
+  }
+
+  // 6c. LEGACY billing intercept — conversations that were asked for firm/GST
+  // *after* their order was confirmed, before the gate above existed.
+  if (!billingFlow && conversation.context?.lastIntent === "billing_details" && text && text.trim().length > 0) {
     try {
       const { result: billing } = await openaiService.extractBillingDetails(text);
       if (billing && billing.has_details && (billing.firm_name || billing.gst_no)) {
@@ -676,31 +967,36 @@ const handleIncomingMessage = async (parsed) => {
   }
 
 
-  // Update conversation context
-  const suggestedStage = intentParser.intentToStage(parsedIntent.intent);
-  if (suggestedStage && canAutoAdvance(conversation.stage, suggestedStage)) {
-    conversation.stage = suggestedStage;
+  // Update conversation context — skipped entirely once a billing reply has
+  // been handled. The parser only saw a firm name / GST number there, and a
+  // GSTIN opens with two digits that it happily reads as a WR size, so trusting
+  // it would set both lastIntent and lastDetectedProduct to nonsense.
+  if (!billingFlow) {
+    const suggestedStage = intentParser.intentToStage(parsedIntent.intent);
+    if (suggestedStage && canAutoAdvance(conversation.stage, suggestedStage)) {
+      conversation.stage = suggestedStage;
+    }
+    if (parsedIntent.category) {
+      conversation.context.lastDetectedProduct = {
+        category: parsedIntent.category,
+        size: parsedIntent.size || "",
+        carbonType: parsedIntent.carbonType || "normal",
+        quantity: parsedIntent.quantity || 0,
+        unit: parsedIntent.unit || "",
+        gauge: parsedIntent.gauge || "",
+        mm: parsedIntent.mm || "",
+        mmRange: parsedIntent.mmRange || "",
+        // Category-specific attributes — carried over so follow-ups
+        // ("?", "today rate") and reply-quotes don't lose the details.
+        inch: parsedIntent.inch || "",
+        packaging: parsedIntent.packaging || null,
+        random: Boolean(parsedIntent.random),
+      };
+    }
+    if (parsedIntent.intent === "negotiation") conversation.context.negotiationActive = true;
+    if (parsedIntent.intent === "delivery_inquiry") conversation.context.deliveryInquiry = true;
+    conversation.context.lastIntent = parsedIntent.intent;
   }
-  if (parsedIntent.category) {
-    conversation.context.lastDetectedProduct = {
-      category: parsedIntent.category,
-      size: parsedIntent.size || "",
-      carbonType: parsedIntent.carbonType || "normal",
-      quantity: parsedIntent.quantity || 0,
-      unit: parsedIntent.unit || "",
-      gauge: parsedIntent.gauge || "",
-      mm: parsedIntent.mm || "",
-      mmRange: parsedIntent.mmRange || "",
-      // Category-specific attributes — carried over so follow-ups
-      // ("?", "today rate") and reply-quotes don't lose the details.
-      inch: parsedIntent.inch || "",
-      packaging: parsedIntent.packaging || null,
-      random: Boolean(parsedIntent.random),
-    };
-  }
-  if (parsedIntent.intent === "negotiation") conversation.context.negotiationActive = true;
-  if (parsedIntent.intent === "delivery_inquiry") conversation.context.deliveryInquiry = true;
-  conversation.context.lastIntent = parsedIntent.intent;
   conversation.markModified("context");
 
   // 7c. Cancel pending negotiation follow-up if customer changed topic.
@@ -741,8 +1037,15 @@ const handleIncomingMessage = async (parsed) => {
     return;
   }
 
-  // 11. AI tries
-  let responseText = null;
+  // 10c. Billing gate handled the turn but has nothing to say (handed over to
+  // an employee, or the order failed to save) → stay silent.
+  if (billingFlow?.silent) {
+    logger.info(`[CHAT] ─── END from=${from} — SILENT (billing gate) ───`);
+    return;
+  }
+
+  // 11. AI tries — a billing reply (firm name saved / re-ask) already has ours.
+  let responseText = billingFlow?.responseText || null;
   let usedGPT = false;
   let aiUsage = { totalTokens: 0 };
   let responseTimeMs = 0;
@@ -769,7 +1072,7 @@ const handleIncomingMessage = async (parsed) => {
   // (has rate / price / bhav keyword without a book keyword) — that's a
   // fresh inquiry, not an order continuation.
   const textHasOrderKeyword = intentParser.ORDER_KEYWORD_REGEX.test(text || "");
-  const textHasPriceKeyword = /\b(?:rate|rates|price|prices|bhav|भाव|quote|quotation|kya\s*rate|क्या\s*रेट)\b/i.test(text || "");
+  const textHasPriceKeyword = PRICE_KEYWORD_REGEX.test(text || "");
   const prevTurnWasOrder = lastWasOrder === true;
   const hasSizeOrQtySignal = Boolean(
     parsedIntent.category || parsedIntent.size || parsedIntent.gauge ||
@@ -779,7 +1082,7 @@ const handleIncomingMessage = async (parsed) => {
   const forceOrderFlow = hasSizeOrQtySignal && (
     textHasOrderKeyword || (prevTurnWasOrder && !textHasPriceKeyword)
   );
-  if (forceOrderFlow && parsedIntent.intent !== "order_confirm") {
+  if (!responseText && forceOrderFlow && parsedIntent.intent !== "order_confirm") {
     logger.info(
       `[CHAT] Route→order (order-kw=${textHasOrderKeyword}, prev-order=${prevTurnWasOrder}, ` +
       `multiItems=${multiItems.length}, qty=${parsedIntent.quantity || 0}, cat=${parsedIntent.category || "-"})`
@@ -791,7 +1094,7 @@ const handleIncomingMessage = async (parsed) => {
   // ─── MULTI-ITEM: multiple sizes in one message — but only for PRICE INQUIRIES.
   // If the message is an order (Rule 1/2 above), skip the price response and
   // let L3 verifyOrder read the chat history to resolve category + items.
-  if (!forceOrderFlow && parsedIntent.intent !== "order_confirm" && multiItems.length >= 2) {
+  if (!responseText && !forceOrderFlow && parsedIntent.intent !== "order_confirm" && multiItems.length >= 2) {
     logger.info(`[CHAT] Multi-item detected: ${multiItems.length} items`);
     const prices = [];
     const quantities = [];
