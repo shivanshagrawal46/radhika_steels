@@ -344,13 +344,13 @@ const traderRateLine = (item, price) => {
 /**
  * Order confirmation ("Sale booked") message — mirrors the format the owner
  * sends by hand: date, total quantity, one block per item with its rate
- * components, the payment figures, the advance terms and the billing firm.
+ * components, the advance terms and the billing firm. Deliberately carries no
+ * rupee totals — only the rate components each line is built from.
  *
  * @param {Array} items    order items (each may carry mmRange for HB)
  * @param {Object} opts
  *   @param {string} [opts.firmName]      — billing firm, shown as "Billing : …"
  *   @param {string} [opts.gstNo]         — GST, shown under Billing when known
- *   @param {number} [opts.paidAmount]    — total paid so far (₹). Default 0.
  *   @param {number} [opts.advanceAmount] — booking advance. Default ADVANCE_AMOUNT.
  *   @param {Date}   [opts.date]          — booking date. Default now (IST).
  */
@@ -358,13 +358,11 @@ const buildOrderConfirmation = async (items, opts = {}) => {
   const {
     firmName = "",
     gstNo = "",
-    paidAmount = 0,
     advanceAmount = ADVANCE_AMOUNT,
     date = new Date(),
   } = opts;
   const { formatIstDateNumeric } = require("../utils/dateUtils");
 
-  let grandTotal = 0;
   let totalTons = 0;    // sum of ton-based items (wr/hb/binding)
   let totalKgNails = 0; // nails are booked in kg, kept separate
   const blocks = [];
@@ -380,11 +378,9 @@ const buildOrderConfirmation = async (items, opts = {}) => {
     }
     if (!price) continue;
 
-    const qty = item.quantity || 0;
     // Nails quantities are in kg; everything else is in ton.
-    const isNails = item.category === "nails";
-    grandTotal += Math.round(price.total * (isNails ? qty / 1000 : qty));
-    if (isNails) totalKgNails += qty;
+    const qty = item.quantity || 0;
+    if (item.category === "nails") totalKgNails += qty;
     else totalTons += qty;
 
     blocks.push(`*${buildItemLabel(item, price)}*\n${traderRateLine(item, price)}`);
@@ -399,20 +395,7 @@ const buildOrderConfirmation = async (items, opts = {}) => {
   if (totalParts.length) msg += `*Total ${totalParts.join(" + ")}*\n`;
   if (blocks.length) msg += `\n${blocks.join("\n\n")}\n`;
 
-  // Payment figures — always Total / Paid / Remaining, reporting actuals only.
-  const paid = Math.max(0, Number(paidAmount) || 0);
-  const remaining = Math.max(0, grandTotal - paid);
-  msg += `\n*Payment:*\n`;
-  msg += `Total Amount: *${INR(grandTotal)}*\n`;
-  msg += `Paid: *${INR(paid)}*\n`;
-  msg += `Remaining: *${INR(remaining)}*\n`;
-
-  // The advance terms line only makes sense while money is still owed.
-  if (remaining > 0) {
-    msg += `\n*🔺 ${Math.round(advanceAmount).toLocaleString("en-IN")} advance payment, remaining after loading immediate (Invoice payment)*\n`;
-  } else {
-    msg += `\n✅ *Full payment received.* Dispatch ke liye ready.\n`;
-  }
+  msg += `\n*🔺 ${Math.round(advanceAmount).toLocaleString("en-IN")} advance payment, remaining after loading immediate (Invoice payment)*\n`;
 
   if (firmName) {
     msg += `\nBilling : ${firmName}\n`;

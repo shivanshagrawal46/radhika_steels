@@ -419,7 +419,6 @@ async function createConfirmedOrder({
     return responseBuilder.buildOrderConfirmation(items, {
       firmName: billing.firmName,
       gstNo: billing.gstNo,
-      paidAmount: 0,
       date: order.createdAt,
     });
   } catch (err) {
